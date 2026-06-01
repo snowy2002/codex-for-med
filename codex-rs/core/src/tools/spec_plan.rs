@@ -2,6 +2,7 @@ use crate::session::turn_context::TurnContext;
 use crate::tools::code_mode::execute_spec::create_code_mode_tool;
 use crate::tools::context::ToolInvocation;
 use crate::tools::handlers::ApplyPatchHandler;
+use crate::tools::handlers::BiomedExternalDbHandler;
 use crate::tools::handlers::CodeModeExecuteHandler;
 use crate::tools::handlers::CodeModeWaitHandler;
 use crate::tools::handlers::CreateGoalHandler;
@@ -581,6 +582,10 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, planned_tools: &mut
     planned_tools.add(RequestUserInputHandler {
         available_modes: request_user_input_available_modes(features),
     });
+    planned_tools.add(BiomedExternalDbHandler::fetch_pdb_entry());
+    planned_tools.add(BiomedExternalDbHandler::fetch_genbank_record());
+    planned_tools.add(BiomedExternalDbHandler::fetch_uniprot_entry());
+    planned_tools.add(BiomedExternalDbHandler::search_uniprot());
 
     if features.enabled(Feature::RequestPermissionsTool) {
         planned_tools.add(RequestPermissionsHandler);

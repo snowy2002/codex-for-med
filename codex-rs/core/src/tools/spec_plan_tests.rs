@@ -478,6 +478,20 @@ async fn host_context_gates_goal_and_agent_job_tools() {
 }
 
 #[tokio::test]
+async fn biomed_external_db_tools_are_core_visible_utilities() {
+    let plan = probe(|_| {}).await;
+    let biomed_tools = [
+        "fetch_pdb_entry",
+        "fetch_genbank_record",
+        "fetch_uniprot_entry",
+        "search_uniprot",
+    ];
+
+    plan.assert_visible_contains(&biomed_tools);
+    plan.assert_registered_contains(&biomed_tools);
+}
+
+#[tokio::test]
 async fn mcp_and_tool_search_follow_direct_and_deferred_tool_exposure() {
     let direct_mcp = probe_with(
         |_| {},
