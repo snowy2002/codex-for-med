@@ -1,5 +1,7 @@
 pub(crate) mod agent_jobs;
 pub(crate) mod agent_jobs_spec;
+mod antibody_training_db;
+pub(crate) mod antibody_training_db_spec;
 pub(crate) mod apply_patch;
 pub(crate) mod apply_patch_spec;
 mod biomed_external_db;
@@ -51,6 +53,7 @@ use crate::session::turn_context::TurnContext;
 use crate::session::turn_context::TurnEnvironment;
 pub(crate) use crate::tools::code_mode::CodeModeExecuteHandler;
 pub(crate) use crate::tools::code_mode::CodeModeWaitHandler;
+pub use antibody_training_db::AntibodyTrainingDbHandler;
 pub use apply_patch::ApplyPatchHandler;
 pub use biomed_external_db::BiomedExternalDbHandler;
 use codex_protocol::models::AdditionalPermissionProfile;

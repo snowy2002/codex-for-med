@@ -433,7 +433,7 @@ async fn search_uniprot(args: SearchUniprotArgs) -> Result<String, FunctionCallE
         .map(|entries| {
             entries
                 .iter()
-                .map(|entry| summarize_uniprot_search_entry(entry))
+                .map(summarize_uniprot_search_entry)
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();

@@ -485,6 +485,7 @@ async fn biomed_external_db_tools_are_core_visible_utilities() {
         "fetch_genbank_record",
         "fetch_uniprot_entry",
         "search_uniprot",
+        "query_antibody_training_records",
     ];
 
     plan.assert_visible_contains(&biomed_tools);

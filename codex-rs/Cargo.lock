@@ -2584,6 +2584,7 @@ dependencies = [
  "sha1",
  "shlex",
  "similar",
+ "sqlx",
  "tempfile",
  "test-case",
  "test-log",
