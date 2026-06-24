@@ -1,10 +1,10 @@
 {
-  "name": "@openai/codex",
+  "name": "@gair/codex-med",
   "version": "0.0.0-dev",
-  "description": "Codex CLI is a coding agent from OpenAI that runs locally on your computer.",
+  "description": "Codex CLI for medical domain agents (fork of OpenAI Codex CLI).",
   "license": "Apache-2.0",
   "bin": {
-    "codex": "bin/codex.js"
+    "codex-med": "bin/codex.js"
   },
   "type": "module",
   "engines": {

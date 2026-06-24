@@ -493,14 +493,14 @@ debug = "none"
 strip = "symbols"
 
 [profile.release]
-lto = "fat"
+lto = "thin"
 split-debuginfo = "off"
 # Because we bundle some of these executables with the TypeScript CLI, we
 # remove everything to make the binary as small as possible.
 strip = "symbols"
 
 # See https://github.com/openai/codex/issues/1411 for details.
-codegen-units = 1
+codegen-units = 16
 
 [profile.profiling]
 inherits = "release"
