@@ -33,6 +33,8 @@ pub(crate) mod test_sync_spec;
 mod tool_search;
 pub(crate) mod tool_search_spec;
 pub(crate) mod unified_exec;
+mod vector_knowledge;
+pub(crate) mod vector_knowledge_spec;
 mod view_image;
 pub(crate) mod view_image_spec;
 
@@ -78,6 +80,7 @@ pub use tool_search::ToolSearchHandler;
 pub use unified_exec::ExecCommandHandler;
 pub(crate) use unified_exec::ExecCommandHandlerOptions;
 pub use unified_exec::WriteStdinHandler;
+pub use vector_knowledge::VectorKnowledgeHandler;
 pub use view_image::ViewImageHandler;
 
 pub(crate) fn parse_arguments<T>(arguments: &str) -> Result<T, FunctionCallError>

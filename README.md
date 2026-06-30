@@ -1,7 +1,7 @@
 <p align="center"><strong>codex-med</strong> — a medical-domain coding agent built on top of OpenAI's Codex CLI.</p>
 
 <p align="center">
-  Adds biomedical tools (UniProt / GenBank / PDB lookup, antibody training database queries, external model gateway support) on top of the upstream Codex CLI.
+  Adds biomedical tools (UniProt / GenBank / PDB lookup, antibody training database queries, vector knowledge search, external model gateway support) on top of the upstream Codex CLI.
 </p>
 
 ---
@@ -34,6 +34,7 @@ This is a fork; everything in the upstream README about agents, sandboxing, MCP 
 
 - **Built-in biomedical lookup tools** — fetch UniProt entries, GenBank records, PDB structures, and search UniProt directly from the agent loop
 - **Antibody training database tool** — read-only SQL queries over a local SQLite database (`training_ready_v1.sqlite`); see `docs/` for schema
+- **Vector knowledge search tool** — search a Qdrant-backed medical vector knowledge collection directly from Codex with `search_vector_knowledge`; see [docs/vector-knowledge-tool.md](docs/vector-knowledge-tool.md)
 - **External model gateway integration** — connect self-hosted prediction models (DLP-Affinity, structure prediction, ADMET, etc.) through the MCP gateway documented in [docs/model-integration.md](docs/model-integration.md)
 
 ---
@@ -55,6 +56,7 @@ The binary lands at `codex-rs/target/release/codex`. To package it as an npm tar
 ## Docs
 
 - [Model integration guide](docs/model-integration.md) — how to plug self-hosted prediction models into the agent
+- [Vector knowledge tool](docs/vector-knowledge-tool.md) — how to configure the built-in vector database search tool
 - [Configuration](docs/config.md)
 - [Contributing](docs/contributing.md)
 

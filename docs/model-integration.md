@@ -3,6 +3,10 @@
 本文说明如何让 `codex-med` 调用自部署医学预测模型，例如
 DLP-Affinity、结构预测、ADMET 等。
 
+注意：本文只针对医学预测模型。向量知识库检索不走模型网关，已经作为
+`codex-med` 内置工具 `search_vector_knowledge` 接入，见
+[vector-knowledge-tool.md](vector-knowledge-tool.md)。
+
 当前推荐架构：
 
 ```text
