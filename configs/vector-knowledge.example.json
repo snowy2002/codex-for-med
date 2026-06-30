@@ -1,0 +1,52 @@
+{
+  "qdrant": {
+    "url": "http://127.0.0.1:6333",
+    "collection": "medical_knowledge",
+    "api_key_env": "CODEX_MED_VECTOR_QDRANT_API_KEY",
+    "distance": "Cosine",
+    "create_collection": true,
+    "create_payload_indexes": true
+  },
+  "embedding": {
+    "url": "http://127.0.0.1:18100/embed",
+    "model": "bge-m3",
+    "api_key_env": "CODEX_MED_EMBEDDING_API_KEY"
+  },
+  "chunking": {
+    "max_chars": 2000,
+    "overlap_chars": 200
+  },
+  "defaults": {
+    "project_id": "dlp-affinity",
+    "visibility": "team",
+    "tags": ["antibody", "affinity"]
+  },
+  "sources": [
+    {
+      "id": "dlp_experiment_notes",
+      "path": "/data2/wysi/knowledge/experiments",
+      "glob": "**/*.md",
+      "category": "experiment_record",
+      "source_type": "markdown",
+      "tags": ["experiment"]
+    },
+    {
+      "id": "dlp_literature",
+      "path": "/data2/wysi/knowledge/literature",
+      "glob": "**/*.txt",
+      "category": "bio_literature",
+      "source_type": "paper_text",
+      "tags": ["literature"]
+    },
+    {
+      "id": "lab_samples",
+      "path": "/data2/wysi/knowledge/lab_samples.csv",
+      "category": "database_record",
+      "source_type": "csv",
+      "id_field": "sample_id",
+      "title_field": "sample_name",
+      "text_fields": ["sample_name", "target_protein", "assay_summary", "conclusion"],
+      "metadata_fields": ["sample_type", "created_at"]
+    }
+  ]
+}

@@ -225,13 +225,55 @@ Codex 中可以直接要求：
 ## 本地 Qdrant 启动示例
 
 ```bash
-docker run --rm \
-  -p 6333:6333 \
+mkdir -p /data2/wysi/qdrant_storage
+docker run -d \
+  --name codex-med-qdrant \
+  --restart unless-stopped \
+  -p 127.0.0.1:6333:6333 \
   -v /data2/wysi/qdrant_storage:/qdrant/storage \
-  qdrant/qdrant
+  qdrant/qdrant:latest
 ```
 
-生产环境建议固定镜像版本，不使用浮动 `latest`。
+检查状态：
+
+```bash
+curl http://127.0.0.1:6333/collections
+```
+
+生产环境建议固定镜像版本，不使用浮动 `latest`。如果需要云服务器部署，继续保持 `6333` 只对内网或 localhost 暴露，外部访问通过 SSH tunnel、反向代理鉴权或内网安全组控制。
+
+## 本地 embedding 服务
+
+仓库提供了一个零依赖的本地哈希 embedding 服务：
+
+```text
+scripts/local_hash_embedding_service.py
+```
+
+它用于本地联调、端到端导入和 Codex tool 冒烟测试。它是确定性的词法哈希向量，不是生产级语义 embedding。要获得更好的医学语义检索效果，应替换为 BGE、E5、MedCPT、BioBERT/SapBERT embedding 等模型服务，并用同一模型重新导入 collection。
+
+启动示例：
+
+```bash
+setsid python scripts/local_hash_embedding_service.py \
+  --host 127.0.0.1 \
+  --port 18100 \
+  --dimensions 512 \
+  > /data2/wysi/vector_knowledge_embedding.log 2>&1 < /dev/null &
+echo $! > /data2/wysi/vector_knowledge_embedding.pid
+```
+
+检查状态：
+
+```bash
+curl http://127.0.0.1:18100/healthz
+```
+
+停止服务：
+
+```bash
+kill "$(cat /data2/wysi/vector_knowledge_embedding.pid)"
+```
 
 ## 和 Codex 配置的关系
 
@@ -268,20 +310,129 @@ search_vector_knowledge
 
 这样可以避免 Codex 运行时误写、误删或污染知识库。
 
-## 后续开发建议
+## 导入脚本
 
-下一步可以在本仓库增加导入脚本：
+仓库内置导入脚本：
 
 ```text
 scripts/import_vector_knowledge.py
 ```
 
-脚本职责：
+脚本支持：
 
-- 读取 Markdown、PDF、网页快照、数据库导出、实验记录。
+- 读取 Markdown、TXT、JSON、JSONL、CSV、TSV。
 - 按分类生成 chunk。
-- 调用同一个 embedding endpoint。
-- 写入 Qdrant collection。
-- 强制写入 `document_id`、`chunk_id`、`category`、`source_uri`、`citation`、`tags`、`project_id`。
+- 调用 embedding endpoint。
+- 自动创建 Qdrant collection。
+- 创建常用 payload 索引。
+- 写入 `document_id`、`chunk_id`、`category`、`source_type`、`source_uri`、`title`、`snippet`、`text`、`tags`、`project_id`、`is_deleted` 等字段。
+
+先 dry-run：
+
+```bash
+python scripts/import_vector_knowledge.py \
+  --embedding-url http://127.0.0.1:18100/embed \
+  --category bio_literature \
+  --source-type pubmed_ocr_markdown \
+  --project-id pubmed-ocr \
+  --tag pubmed \
+  --tag ocr \
+  --tag markdown \
+  --glob '**/*.md' \
+  --max-chars 2000 \
+  --overlap-chars 200 \
+  --dry-run \
+  /data1/wysi/pubmed/ocr
+```
+
+正式导入：
+
+```bash
+python scripts/import_vector_knowledge.py \
+  --embedding-url http://127.0.0.1:18100/embed \
+  --qdrant-url http://127.0.0.1:6333 \
+  --collection medical_knowledge \
+  --create-collection \
+  --create-payload-indexes \
+  --category bio_literature \
+  --source-type pubmed_ocr_markdown \
+  --project-id pubmed-ocr \
+  --tag pubmed \
+  --tag ocr \
+  --tag markdown \
+  --glob '**/*.md' \
+  --max-chars 2000 \
+  --overlap-chars 200 \
+  --batch-size 16 \
+  /data1/wysi/pubmed/ocr
+```
+
+本次 `/data1/wysi/pubmed/ocr` 导入结果：
+
+```text
+documents: 9
+chunks: 437
+collection: medical_knowledge
+category: bio_literature
+source_type: pubmed_ocr_markdown
+project_id: pubmed-ocr
+tags: pubmed, ocr, markdown
+```
+
+命令行直接传路径时，source 元数据只使用命令行参数，不会继承 `configs/vector-knowledge.example.json` 里的 `defaults`。配置文件里的 `defaults` 只影响配置文件中的 `sources`。
+
+## 配置文件导入
+
+也可以编辑：
+
+```text
+configs/vector-knowledge.example.json
+```
+
+然后运行：
+
+```bash
+python scripts/import_vector_knowledge.py \
+  --config configs/vector-knowledge.example.json
+```
+
+配置文件适合维护固定数据源，例如实验记录目录、文献目录、数据库 CSV 导出等。临时导入某个目录时，推荐直接用命令行参数，避免误继承示例默认标签。
+
+## 验证导入
+
+检查 collection：
+
+```bash
+curl http://127.0.0.1:6333/collections
+```
+
+检查 point 数量：
+
+```bash
+curl -H 'Content-Type: application/json' \
+  -d '{"exact":true}' \
+  http://127.0.0.1:6333/collections/medical_knowledge/points/count
+```
+
+本次导入应返回：
+
+```json
+{"result":{"count":437},"status":"ok"}
+```
+
+启动 Codex 前设置：
+
+```bash
+export CODEX_MED_EMBEDDING_URL="http://127.0.0.1:18100/embed"
+export CODEX_MED_VECTOR_QDRANT_URL="http://127.0.0.1:6333"
+export CODEX_MED_VECTOR_COLLECTION="medical_knowledge"
+codex-med
+```
+
+进入 Codex 后可以这样问：
+
+```text
+请用 search_vector_knowledge 检索 bio_literature 里关于 heavy metal contamination 和 cadmium ecological risk 的内容，返回 5 条来源。
+```
 
 运行时检索仍然只由内置 tool 完成。
