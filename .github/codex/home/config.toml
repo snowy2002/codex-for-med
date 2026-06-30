@@ -1,3 +1,8 @@
 model = "gpt-5.1"
 
-# Consider setting [mcp_servers] here!
+# Medical model gateway. Uncomment after starting codex-for-med-gateway.
+# [mcp_servers.gair_models]
+# url = "http://127.0.0.1:3030/mcp"
+# bearer_token_env_var = "GAIR_GATEWAY_TOKEN"
+# startup_timeout_sec = 20
+# tool_timeout_sec = 180
