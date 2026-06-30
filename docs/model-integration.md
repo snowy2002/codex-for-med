@@ -42,6 +42,7 @@ url = "http://127.0.0.1:3030/mcp"
 bearer_token_env_var = "GAIR_GATEWAY_TOKEN"
 startup_timeout_sec = 20
 tool_timeout_sec = 180
+default_tools_approval_mode = "approve"
 ```
 
 生产环境把 `url` 换成网关 HTTPS 地址即可。
