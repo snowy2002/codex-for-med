@@ -108,6 +108,8 @@ export EMBEDDING_API_KEY="<embedding-token>"
 export QDRANT_API_KEY="<qdrant-token>"
 ```
 
+Qdrant token 会作为 `api-key` header 发送给 Qdrant。
+
 ## Qdrant payload 约定
 
 推荐每个 point 的 payload 至少包含：

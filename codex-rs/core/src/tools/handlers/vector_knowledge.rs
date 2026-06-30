@@ -10,9 +10,9 @@ use crate::tools::registry::CoreToolRuntime;
 use crate::tools::registry::ToolExecutor;
 use codex_tools::ToolName;
 use codex_tools::ToolSpec;
-use reqwest::header::AUTHORIZATION;
 use reqwest::header::CONTENT_TYPE;
 use reqwest::header::HeaderMap;
+use reqwest::header::HeaderName;
 use reqwest::header::HeaderValue;
 use serde::Deserialize;
 use serde_json::Map;
@@ -27,6 +27,7 @@ const DEFAULT_COLLECTION: &str = "medical_knowledge";
 const DEFAULT_TOP_K: usize = 8;
 const MAX_TOP_K: usize = 30;
 const HTTP_TIMEOUT_SECONDS: u64 = 60;
+const QDRANT_API_KEY_HEADER: HeaderName = HeaderName::from_static("api-key");
 
 #[derive(Default)]
 pub struct VectorKnowledgeHandler;
@@ -435,10 +436,10 @@ async fn qdrant_search(
     if let Some(api_key) =
         env_non_empty("CODEX_MED_VECTOR_QDRANT_API_KEY").or_else(|| env_non_empty("QDRANT_API_KEY"))
     {
-        let value = HeaderValue::from_str(&format!("Bearer {api_key}")).map_err(|err| {
+        let value = HeaderValue::from_str(&api_key).map_err(|err| {
             FunctionCallError::RespondToModel(format!("invalid Qdrant API key header: {err}"))
         })?;
-        headers.insert(AUTHORIZATION, value);
+        headers.insert(QDRANT_API_KEY_HEADER, value);
     }
 
     let response = client
