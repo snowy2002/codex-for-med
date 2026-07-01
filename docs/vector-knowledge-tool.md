@@ -83,6 +83,8 @@ Qdrant 使用 REST API：
 POST /collections/{collection}/points/search
 ```
 
+如果使用已部署的 Qwen3-Embedding-4B / Qwen3-Reranker-4B 和 Qdrant 组成正式 RAG 知识库，见 [Qwen 向量知识库部署与接入文档](qwen-vector-database-deployment.md)。
+
 ## 环境变量
 
 最小配置：

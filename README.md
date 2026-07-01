@@ -57,6 +57,7 @@ The binary lands at `codex-rs/target/release/codex`. To package it as an npm tar
 
 - [Model integration guide](docs/model-integration.md) — how to plug self-hosted prediction models into the agent
 - [Vector knowledge tool](docs/vector-knowledge-tool.md) — how to configure the built-in vector database search tool
+- [Qwen vector database deployment](docs/qwen-vector-database-deployment.md) — how to deploy Qdrant, connect Qwen embedding/reranker services, import data, and use the database from Codex
 - [Configuration](docs/config.md)
 - [Contributing](docs/contributing.md)
 
