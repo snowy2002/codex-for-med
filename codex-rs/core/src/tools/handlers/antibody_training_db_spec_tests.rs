@@ -9,5 +9,6 @@ fn creates_expected_tool_name() {
     };
 
     assert_eq!(tool.name, QUERY_ANTIBODY_TRAINING_RECORDS_TOOL_NAME);
-    assert!(tool.description.contains("antibody_training_records"));
+    assert!(tool.description.contains("antibodies"));
+    assert!(tool.description.contains("codex-med"));
 }

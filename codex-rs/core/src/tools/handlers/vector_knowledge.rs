@@ -22,12 +22,42 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 use url::Url;
 
-const DEFAULT_QDRANT_URL: &str = "http://127.0.0.1:6333";
-const DEFAULT_COLLECTION: &str = "medical_knowledge";
+const DEFAULT_QDRANT_URL: &str = "http://150.5.166.194/vector";
+const DEFAULT_COLLECTION: &str = "medical_knowledge_qwen3_4b";
 const DEFAULT_TOP_K: usize = 8;
 const MAX_TOP_K: usize = 30;
 const HTTP_TIMEOUT_SECONDS: u64 = 60;
 const QDRANT_API_KEY_HEADER: HeaderName = HeaderName::from_static("api-key");
+
+// --- Baked-in credentials for the shared codex-med gateway -------------------
+//
+// These make `codex-med` work out-of-the-box against the public deployment on
+// codex-med.opensii.ai (Caddy + Qdrant + FastAPI SQL API + Qwen3 embed/rerank).
+// Users who need to point at a different backend can override every value with
+// the environment variables that follow the `env_non_empty(...)` lookups below.
+//
+// Rotating the tokens: edit the constants here, rebuild `codex`, ship the new
+// binary. Alternatively export the matching env vars on the client host.
+const BAKED_QDRANT_API_KEY: &str =
+    "e7d682ca3d11a77ac70a747018439892c137ee556aeec86f7bf4f5da40caf32a";
+
+const DEFAULT_EMBEDDING_URL: &str =
+    "http://gw-bzokqkvr2cblz8ok6y.cn-wulanchabu-acdr-1.pai-eas.aliyuncs.com/api/predict/qwen3_embedding_4b/v1/embeddings";
+const DEFAULT_EMBEDDING_MODEL: &str = "/model_dir/Qwen3-Embedding-4B";
+const BAKED_EMBEDDING_API_KEY: &str =
+    "OTE4MDhiNDE1YmIwYTEzNjE1ZTA2YjFhMTVhNmU3MzczNGVlMTkzZA==";
+
+const DEFAULT_RERANKER_URL: &str =
+    "http://gw-bzokqkvr2cblz8ok6y.cn-wulanchabu-acdr-1.pai-eas.aliyuncs.com/api/predict/qwen3_reranker_4b/v1/rerank";
+const DEFAULT_RERANKER_MODEL: &str = "/model_dir/Qwen3-Reranker-4B";
+const BAKED_RERANKER_API_KEY: &str =
+    "ZmJjYjEwYTI4ZTBjYzhkMTMzYjQwMjk0Zjg1MjQ4ODQ4ODBkOGMyNg==";
+
+// Recall / rerank tuning. We over-recall from Qdrant, ask the reranker to
+// re-score, then return the requested top_k. Match the docs' recommended
+// 50 -> 8 pipeline.
+const DEFAULT_RECALL_MULTIPLIER: usize = 6;
+const MAX_RECALL_TOP_K: usize = 100;
 
 #[derive(Default)]
 pub struct VectorKnowledgeHandler;
@@ -90,6 +120,11 @@ struct SearchVectorKnowledgeArgs {
     embedding_model: Option<String>,
     #[serde(default = "default_include_payload")]
     include_payload: bool,
+    /// Disable the Qwen reranker second-stage sort. Off by default; the tool
+    /// runs Qdrant recall -> reranker -> final top_k. When true, results come
+    /// back in raw Qdrant order.
+    #[serde(default)]
+    disable_reranker: bool,
 }
 
 fn default_top_k() -> usize {
@@ -113,16 +148,18 @@ async fn search_vector_knowledge(
         .map(str::trim)
         .filter(|model| !model.is_empty())
         .map(str::to_string)
-        .or_else(|| env_non_empty("CODEX_MED_EMBEDDING_MODEL"));
+        .or_else(|| env_non_empty("CODEX_MED_EMBEDDING_MODEL"))
+        .unwrap_or_else(|| DEFAULT_EMBEDDING_MODEL.to_string());
     let top_k = args.top_k.clamp(1, MAX_TOP_K);
+    // Recall a wider pool so the reranker has enough material to reorder.
+    let recall_k = (top_k * DEFAULT_RECALL_MULTIPLIER).min(MAX_RECALL_TOP_K).max(top_k);
 
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(HTTP_TIMEOUT_SECONDS))
         .build()
         .map_err(|err| FunctionCallError::Fatal(format!("failed to build HTTP client: {err}")))?;
 
-    let embedding =
-        embed_query(&client, &embedding_url, &query, embedding_model.as_deref()).await?;
+    let embedding = embed_query(&client, &embedding_url, &query, Some(&embedding_model)).await?;
     let filter = build_qdrant_filter(&args.categories, &args.filters)?;
     let search_response = qdrant_search(
         &client,
@@ -130,10 +167,71 @@ async fn search_vector_knowledge(
         &collection,
         &embedding,
         filter,
-        top_k,
+        recall_k,
         args.include_payload,
     )
     .await?;
+
+    // Reranker stage — only skip when the caller explicitly asks or when we
+    // ended up with zero recall hits.
+    let mut rerank_meta = json!({
+        "used": false,
+        "reason": "disabled by caller",
+        "recall_top_k": recall_k,
+        "final_top_k": top_k,
+    });
+    let mut ordered_points: Vec<QdrantPoint> = search_response.result;
+    let mut rerank_scores: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
+
+    if !args.disable_reranker && !ordered_points.is_empty() {
+        let reranker_url = resolve_reranker_url()?;
+        let reranker_model = env_non_empty("CODEX_MED_RERANKER_MODEL")
+            .unwrap_or_else(|| DEFAULT_RERANKER_MODEL.to_string());
+        let documents: Vec<String> = ordered_points
+            .iter()
+            .map(|point| extract_rerank_text(point))
+            .collect();
+        match rerank(&client, &reranker_url, &reranker_model, &query, &documents).await {
+            Ok(ranks) => {
+                // ranks is [(index_in_ordered_points, relevance_score), ...]
+                // Reorder the recall list by rerank score (desc), keep top_k.
+                let mut zipped: Vec<(QdrantPoint, f64)> = ranks
+                    .into_iter()
+                    .filter_map(|(idx, score)| {
+                        ordered_points
+                            .get(idx)
+                            .map(|point| (point.clone(), score))
+                    })
+                    .collect();
+                zipped.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                zipped.truncate(top_k);
+                for (point, score) in &zipped {
+                    rerank_scores.insert(point_id_key(&point.id), *score);
+                }
+                ordered_points = zipped.into_iter().map(|(p, _)| p).collect();
+                rerank_meta = json!({
+                    "used": true,
+                    "reranker_url": reranker_url.as_str(),
+                    "reranker_model": reranker_model,
+                    "recall_top_k": recall_k,
+                    "final_top_k": top_k,
+                });
+            }
+            Err(err) => {
+                // Reranker failure should not sink the whole tool call — fall
+                // back to Qdrant order but tell the model we tried.
+                ordered_points.truncate(top_k);
+                rerank_meta = json!({
+                    "used": false,
+                    "reason": format!("reranker failed, falling back to Qdrant order: {err}"),
+                    "recall_top_k": recall_k,
+                    "final_top_k": top_k,
+                });
+            }
+        }
+    } else {
+        ordered_points.truncate(top_k);
+    }
 
     let output = json!({
         "query": query,
@@ -144,10 +242,12 @@ async fn search_vector_knowledge(
             "embedding_url": embedding_url.as_str(),
             "embedding_model": embedding_model,
         },
+        "rerank": rerank_meta,
         "top_k": top_k,
-        "returned_results": search_response.result.len(),
-        "results": search_response.result.into_iter().enumerate().map(|(idx, point)| {
-            point_to_result(idx + 1, point)
+        "returned_results": ordered_points.len(),
+        "results": ordered_points.into_iter().enumerate().map(|(idx, point)| {
+            let rerank_score = rerank_scores.get(&point_id_key(&point.id)).copied();
+            point_to_result(idx + 1, point, rerank_score)
         }).collect::<Vec<_>>(),
     });
 
@@ -208,13 +308,14 @@ fn resolve_embedding_url(embedding_url: Option<&str>) -> Result<Url, FunctionCal
         .filter(|value| !value.is_empty())
         .map(str::to_string)
         .or_else(|| env_non_empty("CODEX_MED_EMBEDDING_URL"))
-        .ok_or_else(|| {
-            FunctionCallError::RespondToModel(
-                "embedding_url is required; pass it in the tool call or set CODEX_MED_EMBEDDING_URL"
-                    .to_string(),
-            )
-        })?;
+        .unwrap_or_else(|| DEFAULT_EMBEDDING_URL.to_string());
     parse_http_url(&embedding_url, "embedding_url")
+}
+
+fn resolve_reranker_url() -> Result<Url, FunctionCallError> {
+    let reranker_url = env_non_empty("CODEX_MED_RERANKER_URL")
+        .unwrap_or_else(|| DEFAULT_RERANKER_URL.to_string());
+    parse_http_url(&reranker_url, "reranker_url")
 }
 
 fn parse_http_url(value: &str, field_name: &str) -> Result<Url, FunctionCallError> {
@@ -247,9 +348,10 @@ async fn embed_query(
         body["model"] = Value::String(model.to_string());
     }
     let mut request = client.post(embedding_url.clone()).json(&body);
-    if let Some(token) =
-        env_non_empty("CODEX_MED_EMBEDDING_API_KEY").or_else(|| env_non_empty("EMBEDDING_API_KEY"))
-    {
+    let token = env_non_empty("CODEX_MED_EMBEDDING_API_KEY")
+        .or_else(|| env_non_empty("EMBEDDING_API_KEY"))
+        .unwrap_or_else(|| BAKED_EMBEDDING_API_KEY.to_string());
+    if !token.is_empty() {
         request = request.bearer_auth(token);
     }
     let response = request.send().await.map_err(|err| {
@@ -433,9 +535,10 @@ async fn qdrant_search(
 
     let mut headers = HeaderMap::new();
     headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-    if let Some(api_key) =
-        env_non_empty("CODEX_MED_VECTOR_QDRANT_API_KEY").or_else(|| env_non_empty("QDRANT_API_KEY"))
-    {
+    let api_key = env_non_empty("CODEX_MED_VECTOR_QDRANT_API_KEY")
+        .or_else(|| env_non_empty("QDRANT_API_KEY"))
+        .unwrap_or_else(|| BAKED_QDRANT_API_KEY.to_string());
+    if !api_key.is_empty() {
         let value = HeaderValue::from_str(&api_key).map_err(|err| {
             FunctionCallError::RespondToModel(format!("invalid Qdrant API key header: {err}"))
         })?;
@@ -481,7 +584,7 @@ struct QdrantSearchResponse {
     result: Vec<QdrantPoint>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 struct QdrantPoint {
     id: Value,
     score: f64,
@@ -489,7 +592,102 @@ struct QdrantPoint {
     payload: Option<Value>,
 }
 
-fn point_to_result(rank: usize, point: QdrantPoint) -> Value {
+fn point_id_key(id: &Value) -> String {
+    match id {
+        Value::String(s) => s.clone(),
+        other => other.to_string(),
+    }
+}
+
+fn extract_rerank_text(point: &QdrantPoint) -> String {
+    let payload = match &point.payload {
+        Some(payload) => payload,
+        None => return String::new(),
+    };
+    // Prefer full `text`; fall back through the payload fields the tool
+    // normally surfaces in its output.
+    for key in ["text", "snippet", "content", "title"] {
+        if let Some(value) = payload.get(key).and_then(Value::as_str) {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                // Reranker input is best kept under a few thousand chars; the
+                // model still copes with more, but the payload cost adds up.
+                if trimmed.chars().count() > 2_000 {
+                    return trimmed.chars().take(2_000).collect();
+                }
+                return trimmed.to_string();
+            }
+        }
+    }
+    String::new()
+}
+
+async fn rerank(
+    client: &reqwest::Client,
+    reranker_url: &Url,
+    model: &str,
+    query: &str,
+    documents: &[String],
+) -> Result<Vec<(usize, f64)>, FunctionCallError> {
+    if documents.is_empty() {
+        return Ok(Vec::new());
+    }
+    let body = json!({
+        "model": model,
+        "query": query,
+        "documents": documents,
+    });
+    let mut request = client.post(reranker_url.clone()).json(&body);
+    let token = env_non_empty("CODEX_MED_RERANKER_API_KEY")
+        .unwrap_or_else(|| BAKED_RERANKER_API_KEY.to_string());
+    if !token.is_empty() {
+        request = request.bearer_auth(token);
+    }
+    let response = request.send().await.map_err(|err| {
+        FunctionCallError::RespondToModel(format!("reranker request failed: {err}"))
+    })?;
+    let status = response.status();
+    let body = response.text().await.map_err(|err| {
+        FunctionCallError::RespondToModel(format!("failed to read reranker response: {err}"))
+    })?;
+    if !status.is_success() {
+        return Err(FunctionCallError::RespondToModel(format!(
+            "reranker request returned HTTP {status}: {}",
+            truncate_for_error(&body)
+        )));
+    }
+    let value: Value = serde_json::from_str(&body).map_err(|err| {
+        FunctionCallError::RespondToModel(format!("failed to parse reranker response JSON: {err}"))
+    })?;
+    let results = value
+        .get("results")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            FunctionCallError::RespondToModel(
+                "reranker response missing `results` array".to_string(),
+            )
+        })?;
+    let mut out = Vec::with_capacity(results.len());
+    for item in results {
+        let idx = item.get("index").and_then(Value::as_u64).ok_or_else(|| {
+            FunctionCallError::RespondToModel(
+                "reranker result missing integer `index`".to_string(),
+            )
+        })?;
+        let score = item
+            .get("relevance_score")
+            .and_then(Value::as_f64)
+            .ok_or_else(|| {
+                FunctionCallError::RespondToModel(
+                    "reranker result missing numeric `relevance_score`".to_string(),
+                )
+            })?;
+        out.push((idx as usize, score));
+    }
+    Ok(out)
+}
+
+fn point_to_result(rank: usize, point: QdrantPoint, rerank_score: Option<f64>) -> Value {
     let payload = point.payload.unwrap_or(Value::Null);
     let document_id = payload
         .get("document_id")
@@ -524,6 +722,7 @@ fn point_to_result(rank: usize, point: QdrantPoint) -> Value {
     json!({
         "rank": rank,
         "score": point.score,
+        "rerank_score": rerank_score,
         "point_id": point.id,
         "document_id": document_id,
         "chunk_id": chunk_id,
@@ -656,7 +855,7 @@ mod tests {
 
         let qdrant_server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/collections/medical_knowledge/points/search"))
+            .and(path("/collections/medical_knowledge_qwen3_4b/points/search"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "result": [
                     {
@@ -688,6 +887,7 @@ mod tests {
             embedding_url: Some(format!("{}/embed", embedding_server.uri())),
             embedding_model: None,
             include_payload: true,
+            disable_reranker: true,
         })
         .await
         .expect("search succeeds");

@@ -1,3 +1,20 @@
+//! Cloud-backed `query_antibody_training_records` tool.
+//!
+//! Historically this tool read a local SQLite file (`training_ready_v1.sqlite`)
+//! containing the `antibody_training_records` table. The medical fork now ships
+//! against a hosted Postgres deployment behind the codex-med gateway:
+//!
+//!   https://codex-med.opensii.ai/sql/query
+//!
+//! The gateway enforces a SELECT/WITH whitelist, LIMIT injection, and a 15 s
+//! statement timeout server-side. We keep the client-side validator as a
+//! defence-in-depth guard so obviously bad queries never leave the machine.
+//!
+//! Bearer token and endpoint URL are baked into the binary so `codex-med`
+//! works out of the box. Both can be overridden with environment variables
+//! (`CODEX_MED_SQL_API_URL`, `CODEX_MED_SQL_API_TOKEN`) — useful for rotating
+//! credentials or pointing at a private mirror.
+
 use crate::function_tool::FunctionCallError;
 use crate::tools::context::FunctionToolOutput;
 use crate::tools::context::ToolInvocation;
@@ -10,89 +27,62 @@ use crate::tools::registry::CoreToolRuntime;
 use crate::tools::registry::ToolExecutor;
 use codex_tools::ToolName;
 use codex_tools::ToolSpec;
+use reqwest::header::CONTENT_TYPE;
+use reqwest::header::HeaderMap;
+use reqwest::header::HeaderValue;
 use serde::Deserialize;
-use serde_json::Map;
 use serde_json::Value;
 use serde_json::json;
-use sqlx::Column;
-use sqlx::ConnectOptions;
-use sqlx::Row;
-use sqlx::TypeInfo;
-use sqlx::sqlite::SqliteConnectOptions;
-use sqlx::sqlite::SqlitePoolOptions;
 use std::collections::HashSet;
-use std::path::Path;
-use std::path::PathBuf;
-use tracing::log::LevelFilter;
+use std::time::Duration;
 
-const DEFAULT_DATABASE_FILENAME: &str = "training_ready_v1.sqlite";
-const TABLE_NAME: &str = "antibody_training_records";
+const TABLE_NAME: &str = "antibodies";
 const DEFAULT_MAX_ROWS: usize = 25;
 const MAX_ROWS_CAP: usize = 100;
 const DEFAULT_MAX_CELL_CHARS: usize = 2_000;
 const MAX_CELL_CHARS_CAP: usize = 10_000;
+const HTTP_TIMEOUT_SECONDS: u64 = 30;
 
+// --- Baked-in cloud gateway --------------------------------------------------
+//
+// These are the codex-med public deployment defaults. Override with env vars
+// on the client host to rotate tokens or point somewhere else.
+const DEFAULT_SQL_API_URL: &str = "http://150.5.166.194/sql";
+const BAKED_SQL_API_TOKEN: &str =
+    "bc62ea6d3039564fd945291fd29534e1b7e08c6cfe19d239dc28bbed69a8962c";
+
+// The Postgres-backed schema behind the gateway. Kept static so that
+// `include_schema: true` returns useful column docs even if the server is
+// briefly unreachable.
 const TABLE_COLUMNS: &[(&str, &str, &str)] = &[
-    (
-        "row_id",
-        "INTEGER",
-        "Synthetic row id assigned during TSV import.",
-    ),
-    ("antibody_id", "TEXT", "Stable antibody record id."),
-    ("paper_id", "TEXT", "Patent, paper, or source document id."),
-    ("dataset", "TEXT", "Source dataset label."),
-    (
-        "antibody_name",
-        "TEXT",
-        "Antibody name as extracted or normalized.",
-    ),
-    (
-        "raw_target_name",
-        "TEXT",
-        "Raw target name from source text.",
-    ),
-    ("standard_target_name", "TEXT", "Normalized target name."),
-    (
-        "target_modality",
-        "TEXT",
-        "Target modality, for example protein.",
-    ),
-    ("sequence_scope", "TEXT", "Antigen sequence scope."),
-    (
-        "antigen_uniprot_id",
-        "TEXT",
-        "UniProt accession for the antigen target.",
-    ),
-    ("antigen_sequence", "TEXT", "Antigen amino-acid sequence."),
-    (
-        "vh_sequence_aa",
-        "TEXT",
-        "Antibody heavy-chain amino-acid sequence.",
-    ),
-    (
-        "vl_sequence_aa",
-        "TEXT",
-        "Antibody light-chain amino-acid sequence, nullable.",
-    ),
-    (
-        "assay_type",
-        "TEXT",
-        "Assay type used for the affinity label.",
-    ),
-    ("assay_value_raw", "TEXT", "Original assay value string."),
-    ("assay_value_nM", "REAL", "Assay value normalized to nM."),
-    ("assay_value_M", "REAL", "Assay value normalized to M."),
-    (
-        "label_log10_KD_M",
-        "REAL",
-        "Training label as log10(KD in M).",
-    ),
-    (
-        "label_relation",
-        "TEXT",
-        "Relation for the label, for example exact.",
-    ),
-    ("mapping_status", "TEXT", "Target mapping status."),
+    ("row_id", "BIGINT", "Surrogate primary key."),
+    ("paper_id", "TEXT", "Patent / paper identifier (prediction.json top-level key)."),
+    ("document_title", "TEXT", "Source document title."),
+    ("document_category", "TEXT", "Source document category, e.g. patent / paper."),
+    ("antibody_name", "TEXT", "Antibody name as extracted from the source."),
+    ("antibody_type", "TEXT", "Antibody format, e.g. mAb, ScFv."),
+    ("antibody_isotype", "TEXT", "Antibody isotype, e.g. mouse IgG1."),
+    ("source", "TEXT", "Provenance: murine / human / chimeric / humanized / ..."),
+    ("target_name", "TEXT", "Target antigen name."),
+    ("target_type", "TEXT", "Target category, e.g. Tumor antigen."),
+    ("cross_reactivity", "TEXT", "Reported cross-reactivity or lack thereof."),
+    ("epitope", "TEXT", "Reported epitope."),
+    ("experiment", "TEXT", "Assay used to characterise the antibody."),
+    ("binding_kinetics_kd", "TEXT", "KD as reported in the source."),
+    ("binding_kinetics_kon", "TEXT", "kon as reported in the source."),
+    ("binding_kinetics_koff", "TEXT", "koff as reported in the source."),
+    ("binding_ec50", "TEXT", "EC50 as reported."),
+    ("mechanism_of_action", "TEXT", "Reported mechanism of action."),
+    ("quantitative_metric", "TEXT", "Free-form numeric metric, e.g. `<8 ng/ml for OD 0.1`."),
+    ("structure", "TEXT", "Reported structural information."),
+    ("cdrh3_sequence", "TEXT", "CDR-H3 amino-acid sequence."),
+    ("vh_sequence_aa", "TEXT", "Heavy-chain variable region sequence."),
+    ("vl_sequence_aa", "TEXT", "Light-chain variable region sequence."),
+    ("thermal_stability_tm", "TEXT", "Reported thermal stability Tm."),
+    ("in_vivo_half_life", "TEXT", "Reported in-vivo half-life."),
+    ("in_vivo_efficacy", "TEXT", "Reported in-vivo efficacy."),
+    ("reference_source", "TEXT", "Citation string for the record."),
+    ("imported_at", "TIMESTAMPTZ", "Row ingestion timestamp."),
 ];
 
 #[derive(Default)]
@@ -116,7 +106,7 @@ impl ToolExecutor<ToolInvocation> for AntibodyTrainingDbHandler {
         &self,
         invocation: ToolInvocation,
     ) -> Result<Box<dyn crate::tools::context::ToolOutput>, FunctionCallError> {
-        let ToolInvocation { payload, turn, .. } = invocation;
+        let ToolInvocation { payload, .. } = invocation;
         let arguments = match payload {
             ToolPayload::Function { arguments } => arguments,
             _ => {
@@ -126,12 +116,7 @@ impl ToolExecutor<ToolInvocation> for AntibodyTrainingDbHandler {
             }
         };
         let args: QueryAntibodyTrainingRecordsArgs = parse_arguments(&arguments)?;
-        let cwd = {
-            #[allow(deprecated)]
-            turn.cwd.as_path().to_path_buf()
-        };
-        let output = query_antibody_training_records(args, &cwd).await?;
-
+        let output = query_antibody_training_records(args).await?;
         Ok(boxed_tool_output(FunctionToolOutput::from_text(
             output,
             Some(true),
@@ -150,7 +135,10 @@ struct QueryAntibodyTrainingRecordsArgs {
     max_cell_chars: usize,
     #[serde(default)]
     include_schema: bool,
+    /// Legacy field from the local-SQLite version. Ignored server-side, but
+    /// accepted here so old prompts don't break.
     #[serde(default)]
+    #[allow(dead_code)]
     database_path: Option<String>,
 }
 
@@ -162,45 +150,73 @@ fn default_max_cell_chars() -> usize {
     DEFAULT_MAX_CELL_CHARS
 }
 
+fn resolve_sql_api_base() -> String {
+    env_non_empty("CODEX_MED_SQL_API_URL").unwrap_or_else(|| DEFAULT_SQL_API_URL.to_string())
+}
+
+fn resolve_sql_api_token() -> String {
+    env_non_empty("CODEX_MED_SQL_API_TOKEN").unwrap_or_else(|| BAKED_SQL_API_TOKEN.to_string())
+}
+
+fn env_non_empty(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
 async fn query_antibody_training_records(
     args: QueryAntibodyTrainingRecordsArgs,
-    cwd: &Path,
 ) -> Result<String, FunctionCallError> {
     let sql = validate_read_only_sql(&args.sql)?;
-    let database_path = resolve_database_path(args.database_path.as_deref(), cwd);
-    if !database_path.is_file() {
-        return Err(FunctionCallError::RespondToModel(format!(
-            "antibody training SQLite database not found at {}; expected a database imported from training_ready_v1.tsv",
-            database_path.display()
-        )));
-    }
-
     let max_rows = args.max_rows.clamp(1, MAX_ROWS_CAP);
     let max_cell_chars = args.max_cell_chars.clamp(1, MAX_CELL_CHARS_CAP);
-    let limited_sql = format!("SELECT * FROM ({sql}) LIMIT {max_rows}");
-    let pool = open_read_only_sqlite(&database_path).await?;
-    let query_result = run_limited_query(&pool, &limited_sql, max_cell_chars).await;
-    let schema_result = if args.include_schema {
-        Some(load_schema(&pool).await)
-    } else {
-        None
-    };
-    pool.close().await;
 
-    let (columns, rows) = query_result?;
+    let base = resolve_sql_api_base();
+    let token = resolve_sql_api_token();
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(HTTP_TIMEOUT_SECONDS))
+        .build()
+        .map_err(|err| FunctionCallError::Fatal(format!("failed to build HTTP client: {err}")))?;
+
+    let response = call_query_endpoint(&client, &base, &token, &sql, max_rows).await?;
+
+    // Server returns { sql, applied_sql, returned_rows, rows, ... }
+    let mut rows_value = response
+        .get("rows")
+        .cloned()
+        .unwrap_or_else(|| Value::Array(Vec::new()));
+    truncate_cells(&mut rows_value, max_cell_chars);
+    let columns = extract_columns(&rows_value);
+
     let mut output = json!({
-        "database_path": database_path,
-        "table": TABLE_NAME,
+        "backend": {
+            "provider": "codex-med-sql-gateway",
+            "url": format!("{}/query", trim_trailing_slash(&base)),
+            "table": TABLE_NAME,
+        },
         "sql": sql,
-        "applied_sql": limited_sql,
+        "applied_sql": response.get("applied_sql").cloned().unwrap_or(Value::Null),
         "max_rows": max_rows,
-        "returned_rows": rows.len(),
+        "returned_rows": rows_value.as_array().map(|a| a.len()).unwrap_or(0),
         "columns": columns,
-        "rows": rows,
+        "rows": rows_value,
+        "server_duration_ms": response.get("duration_ms").cloned().unwrap_or(Value::Null),
     });
 
-    if let Some(schema) = schema_result {
-        output["schema"] = schema?;
+    if args.include_schema {
+        let schema = fetch_schema(&client, &base, &token).await.unwrap_or_else(|_| {
+            // Server unreachable during schema fetch is not fatal — fall back
+            // to the static column list so the model still gets useful docs.
+            json!({
+                "table": TABLE_NAME,
+                "columns": TABLE_COLUMNS.iter().map(|(name, ty, description)| {
+                    json!({"name": name, "type": ty, "description": description})
+                }).collect::<Vec<_>>(),
+                "note": "static fallback; live schema endpoint was unreachable",
+            })
+        });
+        output["schema"] = schema;
     }
 
     serde_json::to_string_pretty(&output).map_err(|err| {
@@ -208,149 +224,118 @@ async fn query_antibody_training_records(
     })
 }
 
-fn resolve_database_path(database_path: Option<&str>, cwd: &Path) -> PathBuf {
-    match database_path.map(str::trim).filter(|path| !path.is_empty()) {
-        Some(path) => {
-            let path = PathBuf::from(path);
-            if path.is_absolute() {
-                path
-            } else {
-                cwd.join(path)
-            }
-        }
-        None => cwd.join(DEFAULT_DATABASE_FILENAME),
-    }
-}
-
-async fn open_read_only_sqlite(
-    database_path: &Path,
-) -> Result<sqlx::SqlitePool, FunctionCallError> {
-    let options = SqliteConnectOptions::new()
-        .filename(database_path)
-        .create_if_missing(false)
-        .read_only(true)
-        .immutable(true)
-        .log_statements(LevelFilter::Off);
-    SqlitePoolOptions::new()
-        .max_connections(1)
-        .connect_with(options)
+async fn call_query_endpoint(
+    client: &reqwest::Client,
+    base: &str,
+    token: &str,
+    sql: &str,
+    limit: usize,
+) -> Result<Value, FunctionCallError> {
+    let url = format!("{}/query", trim_trailing_slash(base));
+    let body = json!({ "sql": sql, "limit": limit });
+    let mut headers = HeaderMap::new();
+    headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    let response = client
+        .post(&url)
+        .headers(headers)
+        .bearer_auth(token)
+        .json(&body)
+        .send()
         .await
         .map_err(|err| {
             FunctionCallError::RespondToModel(format!(
-                "failed to open antibody training SQLite database {} read-only: {err}",
-                database_path.display()
+                "codex-med SQL gateway request failed: {err}"
             ))
-        })
-}
-
-async fn run_limited_query(
-    pool: &sqlx::SqlitePool,
-    sql: &str,
-    max_cell_chars: usize,
-) -> Result<(Vec<String>, Vec<Value>), FunctionCallError> {
-    let rows = sqlx::query(sql).fetch_all(pool).await.map_err(|err| {
-        FunctionCallError::RespondToModel(format!("antibody training SQL query failed: {err}"))
+        })?;
+    let status = response.status();
+    let body_text = response.text().await.map_err(|err| {
+        FunctionCallError::RespondToModel(format!(
+            "failed to read codex-med SQL gateway response: {err}"
+        ))
     })?;
-    let columns = rows
-        .first()
-        .map(|row| {
-            row.columns()
-                .iter()
-                .map(|column| column.name().to_string())
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    let rows = rows
-        .iter()
-        .map(|row| row_to_json(row, max_cell_chars))
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok((columns, rows))
+    if !status.is_success() {
+        return Err(FunctionCallError::RespondToModel(format!(
+            "codex-med SQL gateway returned HTTP {status}: {}",
+            truncate_for_error(&body_text)
+        )));
+    }
+    serde_json::from_str::<Value>(&body_text).map_err(|err| {
+        FunctionCallError::RespondToModel(format!(
+            "failed to parse codex-med SQL gateway response JSON: {err}"
+        ))
+    })
 }
 
-fn row_to_json(
-    row: &sqlx::sqlite::SqliteRow,
-    max_cell_chars: usize,
+async fn fetch_schema(
+    client: &reqwest::Client,
+    base: &str,
+    token: &str,
 ) -> Result<Value, FunctionCallError> {
-    let mut object = Map::new();
-    for (idx, column) in row.columns().iter().enumerate() {
-        let value = sqlite_cell_to_json(row, idx, max_cell_chars)?;
-        object.insert(column.name().to_string(), value);
+    let url = format!("{}/schema", trim_trailing_slash(base));
+    let response = client
+        .get(&url)
+        .bearer_auth(token)
+        .send()
+        .await
+        .map_err(|err| {
+            FunctionCallError::RespondToModel(format!("schema request failed: {err}"))
+        })?;
+    let status = response.status();
+    let body_text = response.text().await.map_err(|err| {
+        FunctionCallError::RespondToModel(format!("failed to read schema response: {err}"))
+    })?;
+    if !status.is_success() {
+        return Err(FunctionCallError::RespondToModel(format!(
+            "schema endpoint returned HTTP {status}: {}",
+            truncate_for_error(&body_text)
+        )));
     }
-    Ok(Value::Object(object))
+    serde_json::from_str::<Value>(&body_text).map_err(|err| {
+        FunctionCallError::RespondToModel(format!("failed to parse schema JSON: {err}"))
+    })
 }
 
-fn sqlite_cell_to_json(
-    row: &sqlx::sqlite::SqliteRow,
-    idx: usize,
-    max_cell_chars: usize,
-) -> Result<Value, FunctionCallError> {
-    if let Ok(value) = row.try_get::<Option<i64>, _>(idx) {
-        return Ok(value.map_or(Value::Null, Value::from));
-    }
-    if let Ok(value) = row.try_get::<Option<f64>, _>(idx) {
-        return Ok(value.map_or(Value::Null, Value::from));
-    }
-    if let Ok(value) = row.try_get::<Option<String>, _>(idx) {
-        return Ok(match value {
-            Some(value) => Value::String(truncate_cell(value, max_cell_chars)),
-            None => Value::Null,
-        });
-    }
-    if let Ok(value) = row.try_get::<Option<Vec<u8>>, _>(idx) {
-        return Ok(match value {
-            Some(value) => Value::String(format!("<{} byte blob>", value.len())),
-            None => Value::Null,
-        });
-    }
-    let column_type = row
-        .columns()
-        .get(idx)
-        .map(|column| column.type_info().name().to_string())
-        .unwrap_or_else(|| "unknown".to_string());
-    Err(FunctionCallError::RespondToModel(format!(
-        "failed to decode SQLite column {idx} with type {column_type}"
-    )))
+fn extract_columns(rows: &Value) -> Vec<String> {
+    rows.as_array()
+        .and_then(|arr| arr.first())
+        .and_then(Value::as_object)
+        .map(|obj| obj.keys().cloned().collect())
+        .unwrap_or_default()
 }
 
-fn truncate_cell(value: String, max_cell_chars: usize) -> String {
-    let length = value.chars().count();
-    if length <= max_cell_chars {
-        return value;
+fn truncate_cells(rows: &mut Value, max_cell_chars: usize) {
+    let Some(arr) = rows.as_array_mut() else {
+        return;
+    };
+    for row in arr {
+        let Some(obj) = row.as_object_mut() else {
+            continue;
+        };
+        for (_key, cell) in obj.iter_mut() {
+            if let Value::String(s) = cell {
+                if s.chars().count() > max_cell_chars {
+                    let truncated: String = s.chars().take(max_cell_chars).collect();
+                    let dropped = s.chars().count() - max_cell_chars;
+                    *cell = Value::String(format!("{truncated}...<truncated {dropped} chars>"));
+                }
+            }
+        }
     }
-    let truncated = value.chars().take(max_cell_chars).collect::<String>();
+}
+
+fn truncate_for_error(value: &str) -> String {
+    let max_chars = 500;
+    if value.chars().count() <= max_chars {
+        return value.to_string();
+    }
     format!(
-        "{truncated}...<truncated {} chars>",
-        length.saturating_sub(max_cell_chars)
+        "{}...<truncated>",
+        value.chars().take(max_chars).collect::<String>()
     )
 }
 
-async fn load_schema(pool: &sqlx::SqlitePool) -> Result<Value, FunctionCallError> {
-    let row_count = sqlx::query_scalar::<_, i64>(&format!("SELECT COUNT(*) FROM {TABLE_NAME}"))
-        .fetch_one(pool)
-        .await
-        .map_err(|err| {
-            FunctionCallError::RespondToModel(format!("failed to read antibody table count: {err}"))
-        })?;
-
-    Ok(json!({
-        "table": TABLE_NAME,
-        "row_count": row_count,
-        "columns": TABLE_COLUMNS.iter().map(|(name, ty, description)| {
-            json!({
-                "name": name,
-                "type": ty,
-                "description": description,
-            })
-        }).collect::<Vec<_>>(),
-        "recommended_indexes": [
-            "antibody_name",
-            "standard_target_name",
-            "antigen_uniprot_id",
-            "paper_id",
-            "assay_value_nM",
-            "label_log10_KD_M"
-        ],
-    }))
+fn trim_trailing_slash(value: &str) -> &str {
+    value.trim_end_matches('/')
 }
 
 fn validate_read_only_sql(sql: &str) -> Result<String, FunctionCallError> {
@@ -370,13 +355,21 @@ fn validate_read_only_sql(sql: &str) -> Result<String, FunctionCallError> {
             "sql must not contain NUL bytes".to_string(),
         ));
     }
-    if sql.contains(';') {
+    // Trailing ';' is stripped by the gateway anyway; anything more looks like
+    // an attempt to smuggle a second statement.
+    let effective = sql.trim_end_matches(';').trim();
+    if effective.contains(';') {
         return Err(FunctionCallError::RespondToModel(
-            "only one SELECT/WITH statement is allowed; omit semicolons".to_string(),
+            "only one SELECT/WITH statement is allowed; omit intermediate semicolons".to_string(),
+        ));
+    }
+    if effective.contains("--") || effective.contains("/*") {
+        return Err(FunctionCallError::RespondToModel(
+            "SQL comments (`--`, `/*`) are not allowed".to_string(),
         ));
     }
 
-    let lower = sql.trim_start().to_ascii_lowercase();
+    let lower = effective.to_ascii_lowercase();
     if !(lower.starts_with("select") || lower.starts_with("with")) {
         return Err(FunctionCallError::RespondToModel(
             "only read-only SELECT or WITH queries are allowed".to_string(),
@@ -384,8 +377,10 @@ fn validate_read_only_sql(sql: &str) -> Result<String, FunctionCallError> {
     }
 
     let forbidden = HashSet::from([
-        "alter", "analyze", "attach", "create", "delete", "detach", "drop", "insert", "pragma",
-        "reindex", "replace", "update", "vacuum",
+        "alter", "analyze", "attach", "call", "checkpoint", "cluster", "commit", "copy",
+        "create", "delete", "detach", "do", "drop", "grant", "insert", "listen", "notify",
+        "pragma", "reindex", "replace", "reset", "revoke", "rollback", "savepoint", "set",
+        "truncate", "update", "vacuum",
     ]);
     let tokens = lower
         .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
@@ -398,103 +393,81 @@ fn validate_read_only_sql(sql: &str) -> Result<String, FunctionCallError> {
         }
     }
 
-    Ok(sql.to_string())
+    Ok(effective.to_string())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
-    use serde_json::Value;
+    use wiremock::Mock;
+    use wiremock::MockServer;
+    use wiremock::ResponseTemplate;
+    use wiremock::matchers::method;
+    use wiremock::matchers::path;
 
     #[test]
     fn validates_read_only_sql_shape() {
-        assert!(validate_read_only_sql("SELECT * FROM antibody_training_records").is_ok());
+        assert!(validate_read_only_sql("SELECT * FROM antibodies").is_ok());
         assert!(
             validate_read_only_sql(
-                "WITH best AS (SELECT * FROM antibody_training_records) SELECT * FROM best"
+                "WITH best AS (SELECT * FROM antibodies) SELECT * FROM best"
             )
             .is_ok()
         );
-        assert!(validate_read_only_sql("DELETE FROM antibody_training_records").is_err());
+        // Trailing ; is fine (matches server behaviour).
+        assert!(validate_read_only_sql("SELECT * FROM antibodies;").is_ok());
+        assert!(validate_read_only_sql("DELETE FROM antibodies").is_err());
         assert!(validate_read_only_sql("SELECT * FROM x; SELECT * FROM y").is_err());
-        assert!(validate_read_only_sql("PRAGMA table_info(antibody_training_records)").is_err());
-    }
-
-    #[test]
-    fn resolves_default_database_path_against_cwd() {
-        let cwd = Path::new("/tmp/workspace");
-        assert_eq!(
-            resolve_database_path(None, cwd),
-            PathBuf::from("/tmp/workspace/training_ready_v1.sqlite")
-        );
-        assert_eq!(
-            resolve_database_path(Some("data/sample.sqlite"), cwd),
-            PathBuf::from("/tmp/workspace/data/sample.sqlite")
-        );
-        assert_eq!(
-            resolve_database_path(Some("/tmp/sample.sqlite"), cwd),
-            PathBuf::from("/tmp/sample.sqlite")
-        );
+        assert!(validate_read_only_sql("SELECT * -- comment\nFROM antibodies").is_err());
+        assert!(validate_read_only_sql("PRAGMA table_info(antibodies)").is_err());
+        assert!(validate_read_only_sql("UPDATE antibodies SET target_name = 'x'").is_err());
     }
 
     #[tokio::test]
-    async fn queries_sample_antibody_training_database() {
-        let temp = tempfile::tempdir().expect("create temp dir");
-        let db_path = temp.path().join(DEFAULT_DATABASE_FILENAME);
-        let pool = SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect_with(
-                SqliteConnectOptions::new()
-                    .filename(&db_path)
-                    .create_if_missing(true)
-                    .log_statements(LevelFilter::Off),
-            )
-            .await
-            .expect("open sqlite");
-        sqlx::query(
-            r#"
-CREATE TABLE antibody_training_records (
-    row_id INTEGER PRIMARY KEY,
-    antibody_id TEXT NOT NULL,
-    antibody_name TEXT NOT NULL,
-    standard_target_name TEXT NOT NULL,
-    antigen_uniprot_id TEXT NOT NULL,
-    assay_value_nM REAL NOT NULL
-)
-            "#,
-        )
-        .execute(&pool)
-        .await
-        .expect("create table");
-        sqlx::query(
-            "INSERT INTO antibody_training_records (antibody_id, antibody_name, standard_target_name, antigen_uniprot_id, assay_value_nM) VALUES (?, ?, ?, ?, ?)",
-        )
-        .bind("row-1")
-        .bind("A-Na-16")
-        .bind("Tumor necrosis factor receptor superfamily member 9")
-        .bind("Q07011")
-        .bind(20.8_f64)
-        .execute(&pool)
-        .await
-        .expect("insert row");
-        pool.close().await;
+    async fn queries_gateway_and_returns_rows() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/query"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "sql": "SELECT antibody_name FROM antibodies WHERE paper_id = 'EP0323806A1'",
+                "applied_sql": "SELECT * FROM (...) LIMIT 25",
+                "returned_rows": 2,
+                "duration_ms": 3.1,
+                "rows": [
+                    {"antibody_name": "CE 25"},
+                    {"antibody_name": "CE 75-5-6"},
+                ]
+            })))
+            .mount(&server)
+            .await;
 
-        let output = query_antibody_training_records(
-            QueryAntibodyTrainingRecordsArgs {
-                sql: "SELECT antibody_name, antigen_uniprot_id, assay_value_nM FROM antibody_training_records WHERE antigen_uniprot_id = 'Q07011'".to_string(),
-                max_rows: 10,
-                max_cell_chars: 100,
-                include_schema: false,
-                database_path: None,
-            },
-            temp.path(),
-        )
+        // Force the tool at the mock server for the duration of this test.
+        // SAFETY: no other threads are inspecting these env vars in tests.
+        unsafe {
+            std::env::set_var("CODEX_MED_SQL_API_URL", server.uri());
+            std::env::set_var("CODEX_MED_SQL_API_TOKEN", "test-token");
+        }
+
+        let output = query_antibody_training_records(QueryAntibodyTrainingRecordsArgs {
+            sql: "SELECT antibody_name FROM antibodies WHERE paper_id = 'EP0323806A1'"
+                .to_string(),
+            max_rows: 25,
+            max_cell_chars: 100,
+            include_schema: false,
+            database_path: None,
+        })
         .await
         .expect("query should succeed");
+
+        unsafe {
+            std::env::remove_var("CODEX_MED_SQL_API_URL");
+            std::env::remove_var("CODEX_MED_SQL_API_TOKEN");
+        }
+
         let value: Value = serde_json::from_str(&output).expect("output should be JSON");
-        assert_eq!(value["returned_rows"], 1);
-        assert_eq!(value["rows"][0]["antibody_name"], "A-Na-16");
-        assert_eq!(value["rows"][0]["assay_value_nM"], 20.8);
+        assert_eq!(value["returned_rows"], 2);
+        assert_eq!(value["rows"][0]["antibody_name"], "CE 25");
+        assert_eq!(value["rows"][1]["antibody_name"], "CE 75-5-6");
     }
 }

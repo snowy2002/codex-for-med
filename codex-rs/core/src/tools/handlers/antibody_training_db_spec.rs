@@ -10,7 +10,7 @@ pub fn create_query_antibody_training_records_tool() -> ToolSpec {
         (
             "sql".to_string(),
             JsonSchema::string(Some(
-                "Required read-only SQLite SELECT or WITH query. Query `antibody_training_records` for antibody affinity records, or `literature_documents` / `literature_documents_fts` for imported patent and paper markdown knowledge. Example: `SELECT antibody_name, standard_target_name, antigen_uniprot_id, assay_value_nM FROM antibody_training_records WHERE antigen_uniprot_id = 'Q07011' ORDER BY assay_value_nM LIMIT 10`."
+                "Required read-only SQL query against the codex-med cloud gateway. Query the `antibodies` table (PostgreSQL, 28 columns including antibody_name, target_name, cdrh3_sequence, vh_sequence_aa, vl_sequence_aa, paper_id, ...) for antibody metadata extracted from patents and papers. Only single-statement SELECT / WITH queries are accepted; the gateway rejects INSERT / UPDATE / DELETE / DDL. Example: `SELECT antibody_name, antibody_isotype, target_name, cdrh3_sequence FROM antibodies WHERE paper_id = 'EP0323806A1' ORDER BY row_id LIMIT 10`."
                     .to_string(),
             )),
         ),
@@ -38,7 +38,7 @@ pub fn create_query_antibody_training_records_tool() -> ToolSpec {
         (
             "database_path".to_string(),
             JsonSchema::string(Some(
-                "Optional SQLite database path. Relative paths are resolved against the Codex working directory. Defaults to `training_ready_v1.sqlite` in the working directory."
+                "Deprecated. The tool now talks to the codex-med SQL gateway; local SQLite paths are ignored. Kept for backwards compatibility."
                     .to_string(),
             )),
         ),
@@ -46,7 +46,7 @@ pub fn create_query_antibody_training_records_tool() -> ToolSpec {
 
     ToolSpec::Function(ResponsesApiTool {
         name: QUERY_ANTIBODY_TRAINING_RECORDS_TOOL_NAME.to_string(),
-        description: "Run a guarded read-only SQL query against the local biomedical SQLite knowledge database. It contains `antibody_training_records` loaded from training_ready_v1.tsv and `literature_documents` for imported patent/paper markdown content, with `literature_documents_fts` available for SQLite FTS5 full-text search."
+        description: "Run a guarded read-only SQL query against the codex-med cloud antibody knowledge database (PostgreSQL behind http://150.5.166.194/sql). The main table is `antibodies` — 78k+ rows of antibody metadata (name, isotype, target, sequences, epitope, kinetics) mined from patents and papers under `data-extract-new`. Also exposes `antibodies_json_view` with the original JSON field names."
             .to_string(),
         strict: false,
         defer_loading: None,
