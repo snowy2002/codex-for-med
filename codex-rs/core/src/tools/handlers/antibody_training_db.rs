@@ -56,32 +56,100 @@ const BAKED_SQL_API_TOKEN: &str =
 // briefly unreachable.
 const TABLE_COLUMNS: &[(&str, &str, &str)] = &[
     ("row_id", "BIGINT", "Surrogate primary key."),
-    ("paper_id", "TEXT", "Patent / paper identifier (prediction.json top-level key)."),
+    (
+        "paper_id",
+        "TEXT",
+        "Patent / paper identifier (prediction.json top-level key).",
+    ),
     ("document_title", "TEXT", "Source document title."),
-    ("document_category", "TEXT", "Source document category, e.g. patent / paper."),
-    ("antibody_name", "TEXT", "Antibody name as extracted from the source."),
+    (
+        "document_category",
+        "TEXT",
+        "Source document category, e.g. patent / paper.",
+    ),
+    (
+        "antibody_name",
+        "TEXT",
+        "Antibody name as extracted from the source.",
+    ),
     ("antibody_type", "TEXT", "Antibody format, e.g. mAb, ScFv."),
-    ("antibody_isotype", "TEXT", "Antibody isotype, e.g. mouse IgG1."),
-    ("source", "TEXT", "Provenance: murine / human / chimeric / humanized / ..."),
+    (
+        "antibody_isotype",
+        "TEXT",
+        "Antibody isotype, e.g. mouse IgG1.",
+    ),
+    (
+        "source",
+        "TEXT",
+        "Provenance: murine / human / chimeric / humanized / ...",
+    ),
     ("target_name", "TEXT", "Target antigen name."),
-    ("target_type", "TEXT", "Target category, e.g. Tumor antigen."),
-    ("cross_reactivity", "TEXT", "Reported cross-reactivity or lack thereof."),
+    (
+        "target_type",
+        "TEXT",
+        "Target category, e.g. Tumor antigen.",
+    ),
+    (
+        "cross_reactivity",
+        "TEXT",
+        "Reported cross-reactivity or lack thereof.",
+    ),
     ("epitope", "TEXT", "Reported epitope."),
-    ("experiment", "TEXT", "Assay used to characterise the antibody."),
-    ("binding_kinetics_kd", "TEXT", "KD as reported in the source."),
-    ("binding_kinetics_kon", "TEXT", "kon as reported in the source."),
-    ("binding_kinetics_koff", "TEXT", "koff as reported in the source."),
+    (
+        "experiment",
+        "TEXT",
+        "Assay used to characterise the antibody.",
+    ),
+    (
+        "binding_kinetics_kd",
+        "TEXT",
+        "KD as reported in the source.",
+    ),
+    (
+        "binding_kinetics_kon",
+        "TEXT",
+        "kon as reported in the source.",
+    ),
+    (
+        "binding_kinetics_koff",
+        "TEXT",
+        "koff as reported in the source.",
+    ),
     ("binding_ec50", "TEXT", "EC50 as reported."),
-    ("mechanism_of_action", "TEXT", "Reported mechanism of action."),
-    ("quantitative_metric", "TEXT", "Free-form numeric metric, e.g. `<8 ng/ml for OD 0.1`."),
+    (
+        "mechanism_of_action",
+        "TEXT",
+        "Reported mechanism of action.",
+    ),
+    (
+        "quantitative_metric",
+        "TEXT",
+        "Free-form numeric metric, e.g. `<8 ng/ml for OD 0.1`.",
+    ),
     ("structure", "TEXT", "Reported structural information."),
     ("cdrh3_sequence", "TEXT", "CDR-H3 amino-acid sequence."),
-    ("vh_sequence_aa", "TEXT", "Heavy-chain variable region sequence."),
-    ("vl_sequence_aa", "TEXT", "Light-chain variable region sequence."),
-    ("thermal_stability_tm", "TEXT", "Reported thermal stability Tm."),
+    (
+        "vh_sequence_aa",
+        "TEXT",
+        "Heavy-chain variable region sequence.",
+    ),
+    (
+        "vl_sequence_aa",
+        "TEXT",
+        "Light-chain variable region sequence.",
+    ),
+    (
+        "thermal_stability_tm",
+        "TEXT",
+        "Reported thermal stability Tm.",
+    ),
     ("in_vivo_half_life", "TEXT", "Reported in-vivo half-life."),
     ("in_vivo_efficacy", "TEXT", "Reported in-vivo efficacy."),
-    ("reference_source", "TEXT", "Citation string for the record."),
+    (
+        "reference_source",
+        "TEXT",
+        "Citation string for the record.",
+    ),
     ("imported_at", "TIMESTAMPTZ", "Row ingestion timestamp."),
 ];
 
@@ -205,17 +273,19 @@ async fn query_antibody_training_records(
     });
 
     if args.include_schema {
-        let schema = fetch_schema(&client, &base, &token).await.unwrap_or_else(|_| {
-            // Server unreachable during schema fetch is not fatal — fall back
-            // to the static column list so the model still gets useful docs.
-            json!({
-                "table": TABLE_NAME,
-                "columns": TABLE_COLUMNS.iter().map(|(name, ty, description)| {
-                    json!({"name": name, "type": ty, "description": description})
-                }).collect::<Vec<_>>(),
-                "note": "static fallback; live schema endpoint was unreachable",
-            })
-        });
+        let schema = fetch_schema(&client, &base, &token)
+            .await
+            .unwrap_or_else(|_| {
+                // Server unreachable during schema fetch is not fatal — fall back
+                // to the static column list so the model still gets useful docs.
+                json!({
+                    "table": TABLE_NAME,
+                    "columns": TABLE_COLUMNS.iter().map(|(name, ty, description)| {
+                        json!({"name": name, "type": ty, "description": description})
+                    }).collect::<Vec<_>>(),
+                    "note": "static fallback; live schema endpoint was unreachable",
+                })
+            });
         output["schema"] = schema;
     }
 
@@ -377,10 +447,34 @@ fn validate_read_only_sql(sql: &str) -> Result<String, FunctionCallError> {
     }
 
     let forbidden = HashSet::from([
-        "alter", "analyze", "attach", "call", "checkpoint", "cluster", "commit", "copy",
-        "create", "delete", "detach", "do", "drop", "grant", "insert", "listen", "notify",
-        "pragma", "reindex", "replace", "reset", "revoke", "rollback", "savepoint", "set",
-        "truncate", "update", "vacuum",
+        "alter",
+        "analyze",
+        "attach",
+        "call",
+        "checkpoint",
+        "cluster",
+        "commit",
+        "copy",
+        "create",
+        "delete",
+        "detach",
+        "do",
+        "drop",
+        "grant",
+        "insert",
+        "listen",
+        "notify",
+        "pragma",
+        "reindex",
+        "replace",
+        "reset",
+        "revoke",
+        "rollback",
+        "savepoint",
+        "set",
+        "truncate",
+        "update",
+        "vacuum",
     ]);
     let tokens = lower
         .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
@@ -410,10 +504,8 @@ mod tests {
     fn validates_read_only_sql_shape() {
         assert!(validate_read_only_sql("SELECT * FROM antibodies").is_ok());
         assert!(
-            validate_read_only_sql(
-                "WITH best AS (SELECT * FROM antibodies) SELECT * FROM best"
-            )
-            .is_ok()
+            validate_read_only_sql("WITH best AS (SELECT * FROM antibodies) SELECT * FROM best")
+                .is_ok()
         );
         // Trailing ; is fine (matches server behaviour).
         assert!(validate_read_only_sql("SELECT * FROM antibodies;").is_ok());
@@ -450,8 +542,7 @@ mod tests {
         }
 
         let output = query_antibody_training_records(QueryAntibodyTrainingRecordsArgs {
-            sql: "SELECT antibody_name FROM antibodies WHERE paper_id = 'EP0323806A1'"
-                .to_string(),
+            sql: "SELECT antibody_name FROM antibodies WHERE paper_id = 'EP0323806A1'".to_string(),
             max_rows: 25,
             max_cell_chars: 100,
             include_schema: false,

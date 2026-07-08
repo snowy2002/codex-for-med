@@ -41,17 +41,13 @@ const QDRANT_API_KEY_HEADER: HeaderName = HeaderName::from_static("api-key");
 const BAKED_QDRANT_API_KEY: &str =
     "e7d682ca3d11a77ac70a747018439892c137ee556aeec86f7bf4f5da40caf32a";
 
-const DEFAULT_EMBEDDING_URL: &str =
-    "http://gw-bzokqkvr2cblz8ok6y.cn-wulanchabu-acdr-1.pai-eas.aliyuncs.com/api/predict/qwen3_embedding_4b/v1/embeddings";
+const DEFAULT_EMBEDDING_URL: &str = "http://gw-bzokqkvr2cblz8ok6y.cn-wulanchabu-acdr-1.pai-eas.aliyuncs.com/api/predict/qwen3_embedding_4b/v1/embeddings";
 const DEFAULT_EMBEDDING_MODEL: &str = "/model_dir/Qwen3-Embedding-4B";
-const BAKED_EMBEDDING_API_KEY: &str =
-    "OTE4MDhiNDE1YmIwYTEzNjE1ZTA2YjFhMTVhNmU3MzczNGVlMTkzZA==";
+const BAKED_EMBEDDING_API_KEY: &str = "OTE4MDhiNDE1YmIwYTEzNjE1ZTA2YjFhMTVhNmU3MzczNGVlMTkzZA==";
 
-const DEFAULT_RERANKER_URL: &str =
-    "http://gw-bzokqkvr2cblz8ok6y.cn-wulanchabu-acdr-1.pai-eas.aliyuncs.com/api/predict/qwen3_reranker_4b/v1/rerank";
+const DEFAULT_RERANKER_URL: &str = "http://gw-bzokqkvr2cblz8ok6y.cn-wulanchabu-acdr-1.pai-eas.aliyuncs.com/api/predict/qwen3_reranker_4b/v1/rerank";
 const DEFAULT_RERANKER_MODEL: &str = "/model_dir/Qwen3-Reranker-4B";
-const BAKED_RERANKER_API_KEY: &str =
-    "ZmJjYjEwYTI4ZTBjYzhkMTMzYjQwMjk0Zjg1MjQ4ODQ4ODBkOGMyNg==";
+const BAKED_RERANKER_API_KEY: &str = "ZmJjYjEwYTI4ZTBjYzhkMTMzYjQwMjk0Zjg1MjQ4ODQ4ODBkOGMyNg==";
 
 // Recall / rerank tuning. We over-recall from Qdrant, ask the reranker to
 // re-score, then return the requested top_k. Match the docs' recommended
@@ -152,7 +148,9 @@ async fn search_vector_knowledge(
         .unwrap_or_else(|| DEFAULT_EMBEDDING_MODEL.to_string());
     let top_k = args.top_k.clamp(1, MAX_TOP_K);
     // Recall a wider pool so the reranker has enough material to reorder.
-    let recall_k = (top_k * DEFAULT_RECALL_MULTIPLIER).min(MAX_RECALL_TOP_K).max(top_k);
+    let recall_k = (top_k * DEFAULT_RECALL_MULTIPLIER)
+        .min(MAX_RECALL_TOP_K)
+        .max(top_k);
 
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(HTTP_TIMEOUT_SECONDS))
@@ -181,7 +179,8 @@ async fn search_vector_knowledge(
         "final_top_k": top_k,
     });
     let mut ordered_points: Vec<QdrantPoint> = search_response.result;
-    let mut rerank_scores: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
+    let mut rerank_scores: std::collections::HashMap<String, f64> =
+        std::collections::HashMap::new();
 
     if !args.disable_reranker && !ordered_points.is_empty() {
         let reranker_url = resolve_reranker_url()?;
@@ -198,9 +197,7 @@ async fn search_vector_knowledge(
                 let mut zipped: Vec<(QdrantPoint, f64)> = ranks
                     .into_iter()
                     .filter_map(|(idx, score)| {
-                        ordered_points
-                            .get(idx)
-                            .map(|point| (point.clone(), score))
+                        ordered_points.get(idx).map(|point| (point.clone(), score))
                     })
                     .collect();
                 zipped.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
@@ -313,8 +310,8 @@ fn resolve_embedding_url(embedding_url: Option<&str>) -> Result<Url, FunctionCal
 }
 
 fn resolve_reranker_url() -> Result<Url, FunctionCallError> {
-    let reranker_url = env_non_empty("CODEX_MED_RERANKER_URL")
-        .unwrap_or_else(|| DEFAULT_RERANKER_URL.to_string());
+    let reranker_url =
+        env_non_empty("CODEX_MED_RERANKER_URL").unwrap_or_else(|| DEFAULT_RERANKER_URL.to_string());
     parse_http_url(&reranker_url, "reranker_url")
 }
 
@@ -670,9 +667,7 @@ async fn rerank(
     let mut out = Vec::with_capacity(results.len());
     for item in results {
         let idx = item.get("index").and_then(Value::as_u64).ok_or_else(|| {
-            FunctionCallError::RespondToModel(
-                "reranker result missing integer `index`".to_string(),
-            )
+            FunctionCallError::RespondToModel("reranker result missing integer `index`".to_string())
         })?;
         let score = item
             .get("relevance_score")
@@ -855,7 +850,9 @@ mod tests {
 
         let qdrant_server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/collections/medical_knowledge_qwen3_4b/points/search"))
+            .and(path(
+                "/collections/medical_knowledge_qwen3_4b/points/search",
+            ))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "result": [
                     {

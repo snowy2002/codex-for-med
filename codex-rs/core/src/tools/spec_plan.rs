@@ -20,6 +20,7 @@ use crate::tools::handlers::ReadMcpResourceHandler;
 use crate::tools::handlers::RequestPermissionsHandler;
 use crate::tools::handlers::RequestPluginInstallHandler;
 use crate::tools::handlers::RequestUserInputHandler;
+use crate::tools::handlers::ScienceWorkbenchHandler;
 use crate::tools::handlers::ShellCommandHandler;
 use crate::tools::handlers::ShellCommandHandlerOptions;
 use crate::tools::handlers::TestSyncHandler;
@@ -590,6 +591,9 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, planned_tools: &mut
     planned_tools.add(BiomedExternalDbHandler::search_uniprot());
     planned_tools.add(AntibodyTrainingDbHandler);
     planned_tools.add(VectorKnowledgeHandler);
+    planned_tools.add(ScienceWorkbenchHandler::list_med_knowledge_collections());
+    planned_tools.add(ScienceWorkbenchHandler::describe_med_database());
+    planned_tools.add(ScienceWorkbenchHandler::literature_map());
 
     if features.enabled(Feature::RequestPermissionsTool) {
         planned_tools.add(RequestPermissionsHandler);

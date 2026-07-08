@@ -59,28 +59,28 @@ pub fn create_search_vector_knowledge_tool() -> ToolSpec {
         (
             "collection".to_string(),
             JsonSchema::string(Some(
-                "Optional Qdrant collection override. Defaults to CODEX_MED_VECTOR_COLLECTION or medical_knowledge."
+                "Optional Qdrant collection override. Defaults to CODEX_MED_VECTOR_COLLECTION or medical_knowledge_qwen3_4b."
                     .to_string(),
             )),
         ),
         (
             "qdrant_url".to_string(),
             JsonSchema::string(Some(
-                "Optional Qdrant base URL override. Defaults to CODEX_MED_VECTOR_QDRANT_URL or http://127.0.0.1:6333."
+                "Optional Qdrant base URL override. Defaults to CODEX_MED_VECTOR_QDRANT_URL or the shared codex-med gateway at http://150.5.166.194/vector."
                     .to_string(),
             )),
         ),
         (
             "embedding_url".to_string(),
             JsonSchema::string(Some(
-                "Optional embedding endpoint override. Defaults to CODEX_MED_EMBEDDING_URL. The endpoint should accept {\"input\": \"...\"} and return either {\"embedding\": [...]} or OpenAI-compatible {\"data\": [{\"embedding\": [...]}]}."
+                "Optional embedding endpoint override. Defaults to CODEX_MED_EMBEDDING_URL or the shared Qwen3-Embedding-4B endpoint. The endpoint should accept {\"input\": \"...\"} and return either {\"embedding\": [...]} or OpenAI-compatible {\"data\": [{\"embedding\": [...]}]}."
                     .to_string(),
             )),
         ),
         (
             "embedding_model".to_string(),
             JsonSchema::string(Some(
-                "Optional embedding model name sent to the embedding endpoint. Defaults to CODEX_MED_EMBEDDING_MODEL when set."
+                "Optional embedding model name sent to the embedding endpoint. Defaults to CODEX_MED_EMBEDDING_MODEL or /model_dir/Qwen3-Embedding-4B."
                     .to_string(),
             )),
         ),
@@ -94,7 +94,7 @@ pub fn create_search_vector_knowledge_tool() -> ToolSpec {
 
     ToolSpec::Function(ResponsesApiTool {
         name: SEARCH_VECTOR_KNOWLEDGE_TOOL_NAME.to_string(),
-        description: "Search the local or intranet medical vector knowledge database directly from Codex. The tool embeds the query with the configured embedding endpoint, searches a Qdrant collection, and supports category and metadata filters for biomedical literature, web knowledge, real database records, experiment records, protocols, guidelines, patents, and internal notes."
+        description: "Search the codex-med Qdrant vector knowledge database directly from Codex. By default this uses the shared medical_knowledge_qwen3_4b collection, Qwen3-Embedding-4B query embeddings, and a Qwen3 reranker stage. It supports category and metadata filters for biomedical literature, web knowledge, real database records, experiment records, protocols, guidelines, patents, and internal notes."
             .to_string(),
         strict: false,
         defer_loading: None,
