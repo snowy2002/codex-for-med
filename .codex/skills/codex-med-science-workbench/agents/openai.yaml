@@ -1,0 +1,4 @@
+interface:
+  display_name: "Codex Med Science Workbench"
+  short_description: "Route codex-med science tools"
+  default_prompt: "Use $codex-med-science-workbench to choose the right codex-med science workbench tool for this biomedical research request."
