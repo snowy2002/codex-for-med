@@ -918,3 +918,242 @@ git diff --check
 
 - 测试过程中出现过只读文件系统导致无法更新 PATH 的 warning，但测试本身通过。
 - 当前文档和代码改动尚未等同于 npm 发布；npm 用户需要安装包含这些 commits 的新版本后才能使用新增 tools。
+
+---
+
+# 开发记录（branch1，2026-07-16 ~ 07-17）
+
+`branch1` 相比 main 有两个提交，互不重叠，可单独 cherry-pick：
+
+| 提交 | 日期 | 模块 |
+| --- | --- | --- |
+| `5881adcfb` | 2026-07-16 | `literature_map` 增强：reranker、文献去重、`project.json` |
+| `cc11509c0` | 2026-07-17 | PubMed connector：两个外部检索工具 |
+
+内置工具总数由 **9 个增至 11 个**，全部在 `spec_plan.rs` 的 `add_core_utility_tools` 无条件注册。两个提交均未合入 main、未发版；npm 上的 `@gair/codex-med@0.1.4` 仍是 07-08 的基线，用户尚不可见这些改动。
+
+## 模块一：`literature_map` 增强（`5881adcfb`）
+
+对应「后续开发计划 · 第一阶段」中的三项任务：literature_map 加 reranker、加去重、加 project.json manifest。工具签名与产物目录约定不变，仅升级内部行为。
+
+### 完成的任务
+
+**1. 接入 reranker，排序与 `search_vector_knowledge` 对齐。**
+
+改动前链路为 `embed → 单次 Qdrant 检索 → 直接落盘`，证据顺序即向量相似度顺序。改动后链路为：
+
+```text
+embed → 过量召回 → reranker 重排 → 按文献去重 → 落盘 + 写项目清单
+```
+
+先从 Qdrant 过量召回（`recall_k = top_k × 6`，上限 100），再把召回池整体交给共享的 Qwen3-Reranker-4B 重排，证据顺序改由相关性打分决定。reranker 任何失败都降级为 Qdrant 原始顺序，工作流照常出证据包、不报错，并在 `run.json` 用 `rerank.used=false` 与 `rerank.note` 标注原因；未被打分的 chunk 以原始顺序补到尾部，不会消失。证据行新增 `rerank_score` 字段。
+
+**2. 按文献去重，`top_k` 语义由 chunk 改为文献。**
+
+按「文献键」去重，依次取第一个非空的 `paper_id → document_id → source_uri → title`（小写归一），四者皆空时回退到 chunk 自身 point id。改动前 `top_k` 计的是 chunk 数，改动后计的是**去重后的不同文献数**——每篇文献只保留排名最高的 chunk 作代表，累计到 `top_k` 篇为止。产物中的体现：
+
+- `evidence_table.csv`：表头新增 `rerank_score,chunk_count`。
+- `report.md`：表格新增 Rerank / Chunks 列，并附人工校对说明。
+- `citations.bib`：每条 note 追加 `aggregated_chunks=<n>`。
+- `run.json`：新增 `deduplication` 块（`enabled / keys / distinct_documents / chunks_considered`）与 `recall_top_k`。
+
+**3. 新增 `project.json` 运行注册表。**
+
+在项目根写 `research_projects/<project_id>/project.json`，与 `provenance/run.json` 分工：run.json 只保留最近一次运行，project.json 保存全部历史。记录 `schema_version / project_id / topic / created_at / updated_at / run_count`、追加式的 `runs[]` 注册表，以及 `outputs` 产物索引。对同一 `project_id` 重跑是**幂等合并 + 追加**：保留原始 `created_at`，刷新 `topic` 与 `updated_at`，把本次运行追加到 `runs[]`（历史条目从不改写或删除），并保留清单里人工新增的未知字段；旧文件缺失或损坏时降级为全新清单。合并逻辑为纯函数（时钟一次性注入），便于单元测试。
+
+**4. 并发与原子写加固。**
+
+同进程内用互斥锁把 project.json 的「读-改-写」串行化，并用「写临时文件再 rename」的原子提交落盘——保证同一 project 的并发运行不丢失 run 记录，写到一半被中断也不会损坏注册表。
+
+### 参数与产物
+
+工具参数（`LiteratureMapArgs`）与 main 一致：`topic`（必填）、`project_id`、`year_range`、`top_k`（默认 12，上限 30）、`category`（默认 `bio_literature`）。产物目录 `research_projects/<project_id>/` 现含 `literature/{evidence_table.csv, report.md, citations.bib}`、`provenance/run.json`、`project.json`，以及预留的 `code/ figures/ analysis/`。
+
+新增 9 个 inline 单元测试，模块内 13 个测试全部通过。
+
+主要代码位置：
+
+- `codex-rs/core/src/tools/handlers/science_workbench.rs`
+- `codex-rs/core/src/tools/handlers/science_workbench_spec.rs`
+
+## 模块二：PubMed connector（`cc11509c0`）
+
+对应「后续开发计划 · 第二阶段：接入外部科研数据库 connectors」的首批任务，也是「与 Claude Science 的主要差距 · 关键差距 2」的第一步。让 codex-med 从「只查本地已有向量库」迈出第一步，具备主动检索外部实时文献的能力。两个工具加在既有的 `biomed_external_db.rs`（原承载 PDB / GenBank / UniProt 查询），复用其「外部 REST 直连、无缓存」的原生工具模式。
+
+### 新增工具：`search_pubmed_literature`
+
+```text
+search_pubmed_literature
+```
+
+设计目的：
+
+用官方 NCBI E-utilities 检索 PubMed，在 PMID 未知时发现文献。链路为两步——`esearch`（`retmode=json`）取 PMID 列表 → `esummary`（`retmode=json`）取引文摘要。两个端点都是原生 JSON，因此不引入 XML 解析依赖。
+
+参数：
+
+| 参数 | 必填 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `query` | 是 | 无 | PubMed 检索式，支持字段标签与布尔运算符 |
+| `retmax` | 否 | `10` | 返回条数，运行时夹在 [1, 50] |
+| `sort` | 否 | `relevance` | 排序，取值 `relevance` 或 `pub_date` |
+| `min_year` | 否 | 无 | 最早出版年（含端点），须与 `max_year` 成对 |
+| `max_year` | 否 | 无 | 最晚出版年（含端点），须与 `min_year` 成对 |
+
+返回内容包括：`source` / `url` / `query` / `sort` / `total_count`（命中总数）/ `returned`（实际返回数）/ `results[]`，每条含 `pmid`、`title`、`authors`、`journal`、`publication_date`、`doi`；`results[]` 保持 esearch 的排序。
+
+关于年份过滤：`min_year`/`max_year` 成对且顺序正确时，向 esearch 注入 `datetype=pdat`、`mindate`、`maxdate`，是真实的出版年过滤。只给单边会被判为调用方错误——因为 PubMed 对孤立的 `mindate` 或 `maxdate` 会静默忽略，若不拦截会让调用方误以为过滤生效。
+
+关于静默降级：PubMed 对无法执行的限定词（如拼错的字段标签）不报错，而是丢弃后退化为全字段检索。为此返回中额外提供 `query_translation`（PubMed 对检索式的真实解读）、`query_degraded`（被丢弃的限定/排序警告）、`retmax_effective`（实际生效条数）、`dropped_by_esummary`（esearch 找到但 esummary 未描述的条数），使调用方能把「生效的过滤」与「被丢弃的过滤」区分开。
+
+### 新增工具：`fetch_pubmed_record`
+
+```text
+fetch_pubmed_record
+```
+
+设计目的：
+
+按 PMID 取回单条完整记录，用于引用落地和证据提取。与 search 分工的原因是：search 走 esearch/esummary 只给摘要级题录，而**摘要正文、MeSH 词、出版类型需要 efetch 的 MEDLINE 全记录**——正如在 PubMed 网页上「搜索列表 → 点进某条看详情」是两步。链路为 `efetch`（`rettype=medline&retmode=text`）+ 手写 MEDLINE 解析器（与文件内既有的 GenBank flatfile 解析同一路子）。
+
+参数：
+
+| 参数 | 必填 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `pmid` | 是 | 无 | 纯数字 PubMed 标识符，容忍 `PMID:` 前缀 |
+| `include_raw` | 否 | `false` | 是否附带原始 MEDLINE 文本 |
+| `max_mesh_terms` | 否 | `50` | MeSH 词上限，运行时封顶 200 |
+
+返回内容包括：`pmid`、`title`、`abstract`、`authors`、`journal`、`journal_abbreviation`、`publication_date`、`doi`、`publication_types`、`mesh_terms`、`mesh_term_count`（截断前真实总数）、`language`。
+
+### NCBI 访问礼仪的共享重构
+
+把 `tool` / `email` / `api_key` 三个 E-utilities 公共参数从 GenBank 查询函数中抽出为共享的 `ncbi_common_query()`，供 GenBank 与 PubMed 共用。既有的 `NCBI_EMAIL` / `NCBI_API_KEY` 环境变量支持因此自动惠及 PubMed——配置 `NCBI_API_KEY` 后，两者的限速一并从 3 请求/秒提升到 10 请求/秒。注意：这两个工具允许并行调用，未配置 key 时并发检索可能触发 NCBI 的 429 限速。
+
+### 验证
+
+新增 17 个 inline 单元测试（模块内共 24 个通过），3 个真实访问 NCBI 的实盘测试（含针对静默降级的检测）。其中年份过滤的实盘测试做过变异验证：移除 `datetype`/`mindate`/`maxdate` 的注入后测试确实失败，保证它能捕获「参数传了但没送达」这类静默失效。实盘测试须以 `--test-threads=1` 运行以避开 3 请求/秒限速。新增代码 clippy 无诊断。
+
+主要代码位置：
+
+- `codex-rs/core/src/tools/handlers/biomed_external_db.rs`
+- `codex-rs/core/src/tools/handlers/biomed_external_db_spec.rs`
+- `codex-rs/core/src/tools/spec_plan.rs`（注册两个新工具）
+
+## 模块三：PubMed 文献地图 workflow
+
+新增独立 tool：
+
+```text
+pubmed_literature_map
+```
+
+设计目的：
+
+保留原有 `literature_map` 的向量库 workflow 不变，另建一个 PubMed 专用 workflow。这样本地 Qdrant evidence map 和外部实时 PubMed evidence map 可以并存，避免把两类来源强行混排，也避免改变旧工具的行为和产物约定。
+
+链路：
+
+```text
+topic / pubmed_query
+  -> PubMed esearch
+  -> PubMed esummary
+  -> optional MEDLINE efetch per PMID
+  -> research_projects/<project_id>/ literature files
+  -> provenance/run.json
+  -> project.json run registry
+```
+
+参数：
+
+| 参数 | 必填 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `topic` | 是 | 无 | 科研主题，也是默认 PubMed 检索式 |
+| `pubmed_query` | 否 | `topic` | 明确的 PubMed query，可写字段标签和布尔逻辑 |
+| `project_id` | 否 | 从 topic 生成 slug | 研究项目目录名 |
+| `retmax` | 否 | `10` | PubMed 记录数，上限 50 |
+| `sort` | 否 | `relevance` | `relevance` 或 `pub_date` |
+| `min_year` | 否 | 无 | 最早出版年，必须和 `max_year` 成对 |
+| `max_year` | 否 | 无 | 最晚出版年，必须和 `min_year` 成对 |
+| `fetch_abstracts` | 否 | `true` | 是否逐条 efetch MEDLINE 详情 |
+| `max_mesh_terms` | 否 | `50` | 每条记录保留的 MeSH headings，上限 200 |
+
+产物：
+
+```text
+research_projects/<project_id>/
+  literature/
+    pubmed_records.csv
+    pubmed_records.jsonl
+    report.md
+    citations.bib
+  code/
+  analysis/
+  figures/
+  provenance/
+    run.json
+  project.json
+```
+
+产物说明：
+
+- `pubmed_records.csv`：用于人工筛选的结构化 PubMed 记录表，包含 PMID、标题、作者、期刊、日期、DOI、publication types、MeSH、摘要和 fetch error。
+- `pubmed_records.jsonl`：每行一条完整 PubMed 记录，便于后续 ingestion、脚本处理或项目级 RAG。
+- `report.md`：PubMed 文献地图草稿，包含 query translation、query warnings、记录表和摘要/MeSH 摘录。
+- `citations.bib`：按 PMID 生成的 BibTeX 草稿。
+- `code/`、`analysis/`、`figures/`：保留三个标准科研项目结构，分别用于后续代码、分析结果和图表产物。
+- `provenance/run.json`：记录 PubMed query、生效年份窗口、query degradation、返回数、fetch errors 和输出文件。
+- `project.json`：复用现有项目 manifest 追加本次 run，不覆盖历史。
+
+关键设计：
+
+1. **不覆盖 `literature_map`。** 原工具仍然是 Qdrant 向量库 evidence map；新工具只走 PubMed。
+2. **保留 PubMed 自解释字段。** `query_translation` 和 `query_degraded` 会进入 `run.json` 和 report，避免模型误信被 PubMed 静默放宽的查询。
+3. **按 PubMed 记录落盘。** `retmax` 语义是 PubMed record 数，不是 chunk 数。
+4. **可降级抓取详情。** esearch/esummary 成功后，单条 efetch 失败不会让整个 workflow 失败，而是在该记录的 `fetch_error` 标注。
+5. **遵守 NCBI 访问礼仪。** efetch 逐条串行；有 `NCBI_API_KEY` 时使用更短间隔，无 key 时使用保守间隔。
+
+示例调用意图：
+
+```text
+请用 pubmed_literature_map 为 integrated stress response aging neurodegeneration 建一个 PubMed 文献地图，年份 2015-2026，按 relevance 取 20 条。
+```
+
+或者给明确 PubMed 检索式：
+
+```text
+请用 pubmed_literature_map 检索 PubMed：
+(integrated stress response[Title/Abstract]) AND (aging OR neurodegeneration)
+年份 2015-2026，取 20 条，并抓取摘要和 MeSH。
+```
+
+主要代码位置：
+
+- `codex-rs/core/src/tools/handlers/science_workbench.rs`
+- `codex-rs/core/src/tools/handlers/science_workbench_spec.rs`
+- `codex-rs/core/src/tools/spec_plan.rs`（注册新工具）
+
+## 更新后的工具能力矩阵
+
+| Tool | 数据源 | 查询能力 | 写入数据库 | 文件落盘 | 主要用途 |
+| --- | --- | --- | --- | --- | --- |
+| `query_antibody_training_records` | SQL antibody DB | 支持，只读 SQL | 不支持 | 不负责 | 精确查询抗体、靶点、序列、KD、EC50 |
+| `search_vector_knowledge` | Qdrant vector DB | 支持，语义检索 | 不支持 | 不负责 | 查文献、OCR markdown chunks、上下文证据 |
+| `list_med_knowledge_collections` | SQL + Qdrant metadata | 支持，后端发现 | 不支持 | 不负责 | 让模型知道当前有哪些库 |
+| `describe_med_database` | SQL schema + Qdrant metadata | 支持，自描述 | 不支持 | 不负责 | 让模型知道库里有什么字段和用途 |
+| `literature_map` | Qdrant vector DB | 支持，reranked、按文献去重 | 不支持 | 支持 | 生成可复现科研证据包 + 运行注册表 |
+| `search_pubmed_literature` | PubMed（NCBI E-utilities） | 支持，外部文献检索 | 不支持 | 不负责 | 按主题/年份检索实时文献，返回引文摘要 |
+| `fetch_pubmed_record` | PubMed（NCBI E-utilities） | 支持，按 PMID 取记录 | 不支持 | 不负责 | 取标题、摘要、作者、DOI、MeSH，用于证据与引用 |
+| `validate_citations` | Crossref DOI metadata | 支持，引用校验 | 不支持 | 不负责 | 校验 DOI、标题和作者是否一致 |
+| `pubmed_literature_map` | PubMed（NCBI E-utilities） | 支持，实时文献地图 | 不支持 | 支持 | 生成 PubMed records、report、BibTeX、provenance 和项目运行注册表 |
+
+# 下一阶段推荐优先级
+
+结合本轮进度，如果按投入产出比排序，建议下一步优先做：
+
+1. 给 `pubmed_literature_map` 增加 DOI 引用校验步骤：把 DOI-bearing records 自动送入 `validate_citations`，在 `pubmed_records.csv` 增加 citation status。
+2. 接 `build_literature_corpus`：把 `pubmed_records.jsonl` 中的摘要/MeSH 转成项目级 corpus，为后续项目级 RAG 做准备。
+3. 增加 PubMed 和 Qdrant 的交叉标注：按 PMID / DOI / title 标出 “already in local vector index” 和 “new from PubMed”。
+4. 接更多 connector（Europe PMC / Crossref / Semantic Scholar），复用 PubMed map 的项目产物约定。
+
+当前路线保留两个独立 workflow：`literature_map` 负责本地向量库 evidence，`pubmed_literature_map` 负责外部实时 PubMed evidence。后续如果要做 hybrid map，建议先通过交叉标注建立来源关系，而不是直接合并排序。
