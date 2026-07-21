@@ -19,4 +19,16 @@ fn creates_science_workbench_tool_specs() {
     };
     assert_eq!(literature_tool.name, LITERATURE_MAP_TOOL_NAME);
     assert!(literature_tool.description.contains("research_projects"));
+
+    let ToolSpec::Function(pubmed_tool) = create_pubmed_literature_map_tool() else {
+        panic!("pubmed_literature_map should be a function tool");
+    };
+    assert_eq!(pubmed_tool.name, PUBMED_LITERATURE_MAP_TOOL_NAME);
+    assert!(pubmed_tool.description.contains("PubMed"));
+    assert!(pubmed_tool.description.contains("literature_map"));
+    assert!(
+        serde_json::to_string(&pubmed_tool.parameters)
+            .unwrap()
+            .contains("validate_citations")
+    );
 }

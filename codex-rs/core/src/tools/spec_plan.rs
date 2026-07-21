@@ -589,11 +589,15 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, planned_tools: &mut
     planned_tools.add(BiomedExternalDbHandler::fetch_genbank_record());
     planned_tools.add(BiomedExternalDbHandler::fetch_uniprot_entry());
     planned_tools.add(BiomedExternalDbHandler::search_uniprot());
+    planned_tools.add(BiomedExternalDbHandler::search_pubmed_literature());
+    planned_tools.add(BiomedExternalDbHandler::fetch_pubmed_record());
+    planned_tools.add(BiomedExternalDbHandler::validate_citations());
     planned_tools.add(AntibodyTrainingDbHandler);
     planned_tools.add(VectorKnowledgeHandler);
     planned_tools.add(ScienceWorkbenchHandler::list_med_knowledge_collections());
     planned_tools.add(ScienceWorkbenchHandler::describe_med_database());
     planned_tools.add(ScienceWorkbenchHandler::literature_map());
+    planned_tools.add(ScienceWorkbenchHandler::pubmed_literature_map());
 
     if features.enabled(Feature::RequestPermissionsTool) {
         planned_tools.add(RequestPermissionsHandler);

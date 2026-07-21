@@ -7,9 +7,11 @@ use crate::tools::handlers::parse_arguments;
 use crate::tools::handlers::science_workbench_spec::DESCRIBE_MED_DATABASE_TOOL_NAME;
 use crate::tools::handlers::science_workbench_spec::LIST_MED_KNOWLEDGE_COLLECTIONS_TOOL_NAME;
 use crate::tools::handlers::science_workbench_spec::LITERATURE_MAP_TOOL_NAME;
+use crate::tools::handlers::science_workbench_spec::PUBMED_LITERATURE_MAP_TOOL_NAME;
 use crate::tools::handlers::science_workbench_spec::create_describe_med_database_tool;
 use crate::tools::handlers::science_workbench_spec::create_list_med_knowledge_collections_tool;
 use crate::tools::handlers::science_workbench_spec::create_literature_map_tool;
+use crate::tools::handlers::science_workbench_spec::create_pubmed_literature_map_tool;
 use crate::tools::registry::CoreToolRuntime;
 use crate::tools::registry::ToolExecutor;
 use codex_tools::ToolName;
@@ -20,6 +22,22 @@ use serde_json::json;
 use std::fs;
 use std::path::Path;
 use std::time::Duration;
+
+#[path = "science_workbench/pubmed_literature_map.rs"]
+mod pubmed_literature_map;
+use self::pubmed_literature_map::PubmedLiteratureMapArgs;
+use self::pubmed_literature_map::pubmed_literature_map as run_pubmed_literature_map;
+#[path = "science_workbench/project_manifest.rs"]
+mod project_manifest;
+#[path = "science_workbench/rerank.rs"]
+mod rerank;
+use self::project_manifest::record_project_run;
+use self::rerank::LITERATURE_MAX_RECALL;
+use self::rerank::LITERATURE_RECALL_MULTIPLIER;
+use self::rerank::RERANKER_MODEL;
+use self::rerank::ScoredPoint;
+use self::rerank::dedupe_points;
+use self::rerank::rerank_points;
 
 const HTTP_TIMEOUT: Duration = Duration::from_secs(45);
 
@@ -39,6 +57,7 @@ enum ScienceWorkbenchToolKind {
     ListMedKnowledgeCollections,
     DescribeMedDatabase,
     LiteratureMap,
+    PubmedLiteratureMap,
 }
 
 pub struct ScienceWorkbenchHandler {
@@ -62,6 +81,10 @@ impl ScienceWorkbenchHandler {
         Self::new(ScienceWorkbenchToolKind::LiteratureMap)
     }
 
+    pub fn pubmed_literature_map() -> Self {
+        Self::new(ScienceWorkbenchToolKind::PubmedLiteratureMap)
+    }
+
     fn client() -> Result<reqwest::Client, FunctionCallError> {
         reqwest::Client::builder()
             .timeout(HTTP_TIMEOUT)
@@ -80,6 +103,7 @@ impl ToolExecutor<ToolInvocation> for ScienceWorkbenchHandler {
             }
             ScienceWorkbenchToolKind::DescribeMedDatabase => DESCRIBE_MED_DATABASE_TOOL_NAME,
             ScienceWorkbenchToolKind::LiteratureMap => LITERATURE_MAP_TOOL_NAME,
+            ScienceWorkbenchToolKind::PubmedLiteratureMap => PUBMED_LITERATURE_MAP_TOOL_NAME,
         })
     }
 
@@ -90,6 +114,7 @@ impl ToolExecutor<ToolInvocation> for ScienceWorkbenchHandler {
             }
             ScienceWorkbenchToolKind::DescribeMedDatabase => create_describe_med_database_tool(),
             ScienceWorkbenchToolKind::LiteratureMap => create_literature_map_tool(),
+            ScienceWorkbenchToolKind::PubmedLiteratureMap => create_pubmed_literature_map_tool(),
         }
     }
 
@@ -126,6 +151,12 @@ impl ToolExecutor<ToolInvocation> for ScienceWorkbenchHandler {
                 #[allow(deprecated)]
                 let cwd = turn.cwd.as_path();
                 literature_map(&client, args, cwd).await?
+            }
+            ScienceWorkbenchToolKind::PubmedLiteratureMap => {
+                let args: PubmedLiteratureMapArgs = parse_arguments(&arguments)?;
+                #[allow(deprecated)]
+                let cwd = turn.cwd.as_path();
+                run_pubmed_literature_map(&client, args, cwd).await?
             }
         };
 
@@ -281,7 +312,16 @@ async fn literature_map(
         .unwrap_or("bio_literature");
 
     let embedding = embed_query(client, topic).await?;
-    let points = qdrant_search(client, &embedding, top_k, category).await?;
+    let recall_k = (top_k * LITERATURE_RECALL_MULTIPLIER)
+        .min(LITERATURE_MAX_RECALL)
+        .max(top_k);
+    let recall_points = qdrant_search(client, &embedding, recall_k, category).await?;
+
+    // Rerank the recall pool with the shared Qwen3 reranker so evidence ordering
+    // matches search_vector_knowledge, then aggregate chunks of the same document.
+    let (ranked_points, rerank_used, rerank_note) =
+        rerank_points(client, topic, recall_points).await;
+    let (deduped, total_chunks) = dedupe_points(ranked_points, top_k);
 
     let project_dir = cwd.join("research_projects").join(&project_id);
     let literature_dir = project_dir.join("literature");
@@ -295,29 +335,50 @@ async fn literature_map(
     fs::create_dir_all(&figures_dir).map_err(fs_error("create figures directory"))?;
     fs::create_dir_all(&analysis_dir).map_err(fs_error("create analysis directory"))?;
 
-    let evidence_rows = points
+    let evidence_rows = deduped
         .iter()
         .enumerate()
-        .map(|(idx, point)| evidence_row(idx + 1, point))
+        .map(|(idx, scored)| evidence_row(idx + 1, scored))
         .collect::<Vec<_>>();
 
     let evidence_csv = render_evidence_csv(&evidence_rows);
     let report = render_literature_report(topic, args.year_range.as_deref(), &evidence_rows);
     let citations = render_citations_bib(&evidence_rows);
+
+    // Read the wall clock exactly once and thread it (as strings) into the pure
+    // manifest builder, so the run-registry/merge logic stays unit-testable.
+    let now = chrono::Utc::now();
+    let now_rfc3339 = now.to_rfc3339();
+    let run_id = format!("{}_literature_map", now.format("%Y-%m-%dT%H%M%SZ"));
+
     let run = json!({
         "workflow": "literature_map",
+        "run_id": run_id,
+        "run_at": now_rfc3339,
         "project_id": project_id,
         "topic": topic,
         "year_range": args.year_range,
         "top_k": top_k,
+        "recall_top_k": recall_k,
         "category": category,
         "backends": {
             "vector": {
                 "provider": "qdrant",
                 "url": QDRANT_URL,
                 "collection": QDRANT_COLLECTION,
-                "embedding_model": EMBEDDING_MODEL
+                "embedding_model": EMBEDDING_MODEL,
+                "reranker_model": RERANKER_MODEL
             }
+        },
+        "rerank": {
+            "used": rerank_used,
+            "note": rerank_note
+        },
+        "deduplication": {
+            "enabled": true,
+            "keys": ["paper_id", "document_id", "source_uri", "title"],
+            "distinct_documents": evidence_rows.len(),
+            "chunks_considered": total_chunks
         },
         "outputs": {
             "evidence_table": relative_display(&project_dir, &literature_dir.join("evidence_table.csv")),
@@ -335,19 +396,42 @@ async fn literature_map(
         &serde_json::to_string_pretty(&run).map_err(json_error("serialize run provenance"))?,
     )?;
 
+    let manifest_path = record_project_run(
+        &project_dir,
+        &project_id,
+        topic,
+        &now_rfc3339,
+        run,
+        &provenance_dir.join("run.json"),
+        &[
+            (
+                "evidence_table",
+                literature_dir.join("evidence_table.csv").as_path(),
+            ),
+            ("report", literature_dir.join("report.md").as_path()),
+            ("citations", literature_dir.join("citations.bib").as_path()),
+        ],
+    )?;
+
     let output = json!({
         "project_id": project_id,
         "project_dir": project_dir,
         "topic": topic,
         "evidence_count": evidence_rows.len(),
+        "recall_top_k": recall_k,
+        "distinct_documents": evidence_rows.len(),
+        "chunks_considered": total_chunks,
+        "rerank_used": rerank_used,
+        "manifest": manifest_path,
         "created_files": [
             literature_dir.join("evidence_table.csv"),
             literature_dir.join("report.md"),
             literature_dir.join("citations.bib"),
-            provenance_dir.join("run.json")
+            provenance_dir.join("run.json"),
+            manifest_path
         ],
         "next_steps": [
-            "Review literature/evidence_table.csv for noisy OCR chunks.",
+            "Review literature/evidence_table.csv; chunk_count shows how many chunks backed each document.",
             "Use report.md as the first evidence map draft.",
             "Add human curation notes before using the map in a manuscript."
         ]
@@ -569,6 +653,8 @@ fn truncate_for_error(value: &str) -> String {
 struct EvidenceRow {
     rank: usize,
     score: f64,
+    rerank_score: Option<f64>,
+    chunk_count: usize,
     point_id: String,
     document_id: String,
     chunk_id: String,
@@ -580,7 +666,8 @@ struct EvidenceRow {
     snippet: String,
 }
 
-fn evidence_row(rank: usize, point: &Value) -> EvidenceRow {
+fn evidence_row(rank: usize, scored: &ScoredPoint) -> EvidenceRow {
+    let point = &scored.point;
     let payload = point.get("payload").unwrap_or(&Value::Null);
     EvidenceRow {
         rank,
@@ -588,6 +675,8 @@ fn evidence_row(rank: usize, point: &Value) -> EvidenceRow {
             .get("score")
             .and_then(Value::as_f64)
             .unwrap_or_default(),
+        rerank_score: scored.rerank_score,
+        chunk_count: scored.chunk_count,
         point_id: value_to_string(point.get("id").unwrap_or(&Value::Null)),
         document_id: payload_string(payload, "document_id"),
         chunk_id: payload_string(payload, "chunk_id"),
@@ -630,13 +719,17 @@ fn value_to_string(value: &Value) -> String {
 
 fn render_evidence_csv(rows: &[EvidenceRow]) -> String {
     let mut out =
-        "rank,score,point_id,document_id,chunk_id,paper_id,category,source_type,title,source_uri,snippet\n"
+        "rank,score,rerank_score,chunk_count,point_id,document_id,chunk_id,paper_id,category,source_type,title,source_uri,snippet\n"
             .to_string();
     for row in rows {
         out.push_str(&format!(
-            "{},{},{},{},{},{},{},{},{},{},{}\n",
+            "{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
             row.rank,
             row.score,
+            row.rerank_score
+                .map(|score| score.to_string())
+                .unwrap_or_default(),
+            row.chunk_count,
             csv_escape(&row.point_id),
             csv_escape(&row.document_id),
             csv_escape(&row.chunk_id),
@@ -661,26 +754,37 @@ fn render_literature_report(topic: &str, year_range: Option<&str>, rows: &[Evide
         out.push_str(&format!("Year range: {}\n\n", year_range.trim()));
     }
     out.push_str("## Evidence Table Summary\n\n");
-    out.push_str("| Rank | Score | Paper ID | Title | Source |\n");
-    out.push_str("| ---: | ---: | --- | --- | --- |\n");
+    out.push_str("| Rank | Rerank | Vector | Chunks | Paper ID | Title | Source |\n");
+    out.push_str("| ---: | ---: | ---: | ---: | --- | --- | --- |\n");
     for row in rows {
+        let rerank = row
+            .rerank_score
+            .map(|score| format!("{score:.4}"))
+            .unwrap_or_else(|| "-".to_string());
         out.push_str(&format!(
-            "| {} | {:.4} | {} | {} | {} |\n",
+            "| {} | {} | {:.4} | {} | {} | {} | {} |\n",
             row.rank,
+            rerank,
             row.score,
+            row.chunk_count,
             markdown_escape(&row.paper_id),
             markdown_escape(&row.title),
             markdown_escape(&row.source_uri),
         ));
     }
     out.push_str("\n## Notes For Human Curation\n\n");
+    out.push_str("- Chunks were reranked with the Qwen3 reranker and aggregated per document (paper_id/document_id/source_uri/title); `chunk_count` shows how many chunks backed each row.\n");
     out.push_str("- The current vector collection is OCR-repaired markdown and may contain table/OCR noise.\n");
     out.push_str("- Treat this as a first-pass evidence map; verify source documents before manuscript use.\n");
     out.push_str("- Add mechanism, disease, model system, evidence level, and citation status columns during curation.\n\n");
     out.push_str("## Retrieved Snippets\n\n");
     for row in rows {
+        let rerank = row
+            .rerank_score
+            .map(|score| format!("{score:.4}"))
+            .unwrap_or_else(|| "-".to_string());
         out.push_str(&format!(
-            "### {}. {}\n\nSource: `{}`\n\n{}\n\n",
+            "### {}. {}\n\nSource: `{}`  ·  rerank: {}  ·  chunks: {}\n\n{}\n\n",
             row.rank,
             if row.title.is_empty() {
                 &row.paper_id
@@ -688,6 +792,8 @@ fn render_literature_report(topic: &str, year_range: Option<&str>, rows: &[Evide
                 &row.title
             },
             row.source_uri,
+            rerank,
+            row.chunk_count,
             row.snippet
         ));
     }
@@ -703,7 +809,7 @@ fn render_citations_bib(rows: &[EvidenceRow]) -> String {
             sanitize_bib_key(&row.paper_id)
         };
         out.push_str(&format!(
-            "@misc{{{},\n  title = {{{}}},\n  howpublished = {{{}}},\n  note = {{codex-med vector chunk {}; document_id={}}}\n}}\n\n",
+            "@misc{{{},\n  title = {{{}}},\n  howpublished = {{{}}},\n  note = {{codex-med vector chunk {}; document_id={}; aggregated_chunks={}}}\n}}\n\n",
             key,
             bib_escape(if row.title.is_empty() {
                 &row.document_id
@@ -713,6 +819,7 @@ fn render_citations_bib(rows: &[EvidenceRow]) -> String {
             bib_escape(&row.source_uri),
             row.chunk_id,
             row.document_id,
+            row.chunk_count,
         ));
     }
     out
@@ -798,6 +905,6 @@ mod tests {
     #[test]
     fn renders_evidence_csv_header() {
         let csv = render_evidence_csv(&[]);
-        assert!(csv.starts_with("rank,score,point_id"));
+        assert!(csv.starts_with("rank,score,rerank_score,chunk_count,point_id"));
     }
 }
