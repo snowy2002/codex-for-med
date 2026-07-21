@@ -8,6 +8,9 @@ pub const FETCH_PDB_ENTRY_TOOL_NAME: &str = "fetch_pdb_entry";
 pub const FETCH_GENBANK_RECORD_TOOL_NAME: &str = "fetch_genbank_record";
 pub const FETCH_UNIPROT_ENTRY_TOOL_NAME: &str = "fetch_uniprot_entry";
 pub const SEARCH_UNIPROT_TOOL_NAME: &str = "search_uniprot";
+pub const SEARCH_PUBMED_LITERATURE_TOOL_NAME: &str = "search_pubmed_literature";
+pub const FETCH_PUBMED_RECORD_TOOL_NAME: &str = "fetch_pubmed_record";
+pub const VALIDATE_CITATIONS_TOOL_NAME: &str = "validate_citations";
 
 pub fn create_fetch_pdb_entry_tool() -> ToolSpec {
     let properties = BTreeMap::from([
@@ -168,6 +171,153 @@ pub fn create_search_uniprot_tool() -> ToolSpec {
         parameters: JsonSchema::object(
             properties,
             Some(vec!["query".to_string()]),
+            Some(false.into()),
+        ),
+        output_schema: None,
+    })
+}
+
+pub fn create_search_pubmed_literature_tool() -> ToolSpec {
+    let properties = BTreeMap::from([
+        (
+            "query".to_string(),
+            JsonSchema::string(Some(
+                "Required PubMed search query. Supports full PubMed syntax including field tags and boolean operators, for example `integrated stress response AND neurodegeneration[Title/Abstract]`."
+                    .to_string(),
+            )),
+        ),
+        (
+            "retmax".to_string(),
+            JsonSchema::integer(Some(
+                "Maximum number of records to return, capped at 50. Defaults to 10.".to_string(),
+            )),
+        ),
+        (
+            "sort".to_string(),
+            JsonSchema::string_enum(
+                vec![json!("relevance"), json!("pub_date")],
+                Some("Result ordering. Defaults to relevance.".to_string()),
+            ),
+        ),
+        (
+            "min_year".to_string(),
+            JsonSchema::integer(Some(
+                "Optional earliest publication year, inclusive. Requires max_year to also be set."
+                    .to_string(),
+            )),
+        ),
+        (
+            "max_year".to_string(),
+            JsonSchema::integer(Some(
+                "Optional latest publication year, inclusive. Requires min_year to also be set."
+                    .to_string(),
+            )),
+        ),
+    ]);
+
+    ToolSpec::Function(ResponsesApiTool {
+        name: SEARCH_PUBMED_LITERATURE_TOOL_NAME.to_string(),
+        description: "Search PubMed with the official NCBI E-utilities API and return concise citation summaries (PMID, title, authors, journal, publication date, DOI). Use to discover literature when PMIDs are unknown, then call fetch_pubmed_record for abstracts and MeSH terms. PubMed silently drops qualifiers it cannot honour (a misspelled field tag widens to an all-fields search), so check `query_degraded` and `query_translation` in the result before trusting that a tag or filter applied."
+            .to_string(),
+        strict: false,
+        defer_loading: None,
+        parameters: JsonSchema::object(
+            properties,
+            Some(vec!["query".to_string()]),
+            Some(false.into()),
+        ),
+        output_schema: None,
+    })
+}
+
+pub fn create_fetch_pubmed_record_tool() -> ToolSpec {
+    let properties = BTreeMap::from([
+        (
+            "pmid".to_string(),
+            JsonSchema::string(Some(
+                "Required PubMed identifier, digits only, for example `33301246`.".to_string(),
+            )),
+        ),
+        (
+            "include_raw".to_string(),
+            JsonSchema::boolean(Some(
+                "Whether to include the raw NCBI MEDLINE text in the result. Defaults to false."
+                    .to_string(),
+            )),
+        ),
+        (
+            "max_mesh_terms".to_string(),
+            JsonSchema::integer(Some(
+                "Maximum number of MeSH headings to return, capped at 200. Defaults to 50."
+                    .to_string(),
+            )),
+        ),
+    ]);
+
+    ToolSpec::Function(ResponsesApiTool {
+        name: FETCH_PUBMED_RECORD_TOOL_NAME.to_string(),
+        description: "Fetch a single authoritative PubMed record by PMID, including title, abstract, authors, journal, DOI, and MeSH headings. Use for citation grounding and evidence extraction once a PMID is known."
+            .to_string(),
+        strict: false,
+        defer_loading: None,
+        parameters: JsonSchema::object(
+            properties,
+            Some(vec!["pmid".to_string()]),
+            Some(false.into()),
+        ),
+        output_schema: None,
+    })
+}
+
+pub fn create_validate_citations_tool() -> ToolSpec {
+    let citation_item = JsonSchema::object(
+        BTreeMap::from([
+            (
+                "doi".to_string(),
+                JsonSchema::string(Some(
+                    "Required DOI of the cited work, for example `10.1126/science.1225829`. A `doi:` prefix or a doi.org URL is accepted."
+                        .to_string(),
+                )),
+            ),
+            (
+                "claimed_title".to_string(),
+                JsonSchema::string(Some(
+                    "Optional title the citation claims for this DOI. If given, it is compared (tolerant of case, spacing, and dash/quote variants) against the authoritative Crossref title."
+                        .to_string(),
+                )),
+            ),
+            (
+                "claimed_authors".to_string(),
+                JsonSchema::array(
+                    JsonSchema::string(None),
+                    Some(
+                        "Optional author names the citation claims. Each is matched by surname against the Crossref author list."
+                            .to_string(),
+                    ),
+                ),
+            ),
+        ]),
+        Some(vec!["doi".to_string()]),
+        Some(false.into()),
+    );
+
+    let properties = BTreeMap::from([(
+        "citations".to_string(),
+        JsonSchema::array(
+            citation_item,
+            Some("The citations to verify, up to 25 per call.".to_string()),
+        ),
+    )]);
+
+    ToolSpec::Function(ResponsesApiTool {
+        name: VALIDATE_CITATIONS_TOOL_NAME.to_string(),
+        description: "Verify citations against the authoritative Crossref record by DOI. For each citation, resolves the DOI and reports whether it exists and whether the claimed title/authors match the real article — catching the common failure where a generated reference cites a DOI that resolves to a different paper. This is a deterministic metadata check; it does NOT judge whether the article supports the claim it is cited for."
+            .to_string(),
+        strict: false,
+        defer_loading: None,
+        parameters: JsonSchema::object(
+            properties,
+            Some(vec!["citations".to_string()]),
             Some(false.into()),
         ),
         output_schema: None,

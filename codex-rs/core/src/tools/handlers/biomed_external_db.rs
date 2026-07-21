@@ -7,12 +7,18 @@ use crate::tools::context::ToolPayload;
 use crate::tools::context::boxed_tool_output;
 use crate::tools::handlers::biomed_external_db_spec::FETCH_GENBANK_RECORD_TOOL_NAME;
 use crate::tools::handlers::biomed_external_db_spec::FETCH_PDB_ENTRY_TOOL_NAME;
+use crate::tools::handlers::biomed_external_db_spec::FETCH_PUBMED_RECORD_TOOL_NAME;
 use crate::tools::handlers::biomed_external_db_spec::FETCH_UNIPROT_ENTRY_TOOL_NAME;
+use crate::tools::handlers::biomed_external_db_spec::SEARCH_PUBMED_LITERATURE_TOOL_NAME;
 use crate::tools::handlers::biomed_external_db_spec::SEARCH_UNIPROT_TOOL_NAME;
+use crate::tools::handlers::biomed_external_db_spec::VALIDATE_CITATIONS_TOOL_NAME;
 use crate::tools::handlers::biomed_external_db_spec::create_fetch_genbank_record_tool;
 use crate::tools::handlers::biomed_external_db_spec::create_fetch_pdb_entry_tool;
+use crate::tools::handlers::biomed_external_db_spec::create_fetch_pubmed_record_tool;
 use crate::tools::handlers::biomed_external_db_spec::create_fetch_uniprot_entry_tool;
+use crate::tools::handlers::biomed_external_db_spec::create_search_pubmed_literature_tool;
 use crate::tools::handlers::biomed_external_db_spec::create_search_uniprot_tool;
+use crate::tools::handlers::biomed_external_db_spec::create_validate_citations_tool;
 use crate::tools::handlers::parse_arguments;
 use crate::tools::registry::CoreToolRuntime;
 use crate::tools::registry::ToolExecutor;
@@ -22,6 +28,20 @@ use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
 use serde_json::json;
+
+#[path = "biomed_external_db/citation_validation.rs"]
+mod citation_validation;
+#[path = "biomed_external_db/pubmed.rs"]
+mod pubmed;
+
+pub(crate) use self::citation_validation::CitationToCheck;
+use self::citation_validation::ValidateCitationsArgs;
+use self::citation_validation::validate_citations;
+pub(crate) use self::citation_validation::validate_one_citation;
+use self::pubmed::FetchPubmedRecordArgs;
+use self::pubmed::SearchPubmedLiteratureArgs;
+use self::pubmed::fetch_pubmed_record;
+use self::pubmed::search_pubmed_literature;
 
 const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 const USER_AGENT: &str = "codex-for-med/biomed-external-db";
@@ -37,6 +57,9 @@ enum BiomedExternalDbToolKind {
     FetchGenbankRecord,
     FetchUniprotEntry,
     SearchUniprot,
+    SearchPubmedLiterature,
+    FetchPubmedRecord,
+    ValidateCitations,
 }
 
 pub struct BiomedExternalDbHandler {
@@ -64,6 +87,18 @@ impl BiomedExternalDbHandler {
         Self::new(BiomedExternalDbToolKind::SearchUniprot)
     }
 
+    pub fn search_pubmed_literature() -> Self {
+        Self::new(BiomedExternalDbToolKind::SearchPubmedLiterature)
+    }
+
+    pub fn fetch_pubmed_record() -> Self {
+        Self::new(BiomedExternalDbToolKind::FetchPubmedRecord)
+    }
+
+    pub fn validate_citations() -> Self {
+        Self::new(BiomedExternalDbToolKind::ValidateCitations)
+    }
+
     fn client() -> Result<reqwest::Client, FunctionCallError> {
         reqwest::Client::builder()
             .timeout(HTTP_TIMEOUT)
@@ -81,6 +116,9 @@ impl ToolExecutor<ToolInvocation> for BiomedExternalDbHandler {
             BiomedExternalDbToolKind::FetchGenbankRecord => FETCH_GENBANK_RECORD_TOOL_NAME,
             BiomedExternalDbToolKind::FetchUniprotEntry => FETCH_UNIPROT_ENTRY_TOOL_NAME,
             BiomedExternalDbToolKind::SearchUniprot => SEARCH_UNIPROT_TOOL_NAME,
+            BiomedExternalDbToolKind::SearchPubmedLiterature => SEARCH_PUBMED_LITERATURE_TOOL_NAME,
+            BiomedExternalDbToolKind::FetchPubmedRecord => FETCH_PUBMED_RECORD_TOOL_NAME,
+            BiomedExternalDbToolKind::ValidateCitations => VALIDATE_CITATIONS_TOOL_NAME,
         })
     }
 
@@ -90,6 +128,11 @@ impl ToolExecutor<ToolInvocation> for BiomedExternalDbHandler {
             BiomedExternalDbToolKind::FetchGenbankRecord => create_fetch_genbank_record_tool(),
             BiomedExternalDbToolKind::FetchUniprotEntry => create_fetch_uniprot_entry_tool(),
             BiomedExternalDbToolKind::SearchUniprot => create_search_uniprot_tool(),
+            BiomedExternalDbToolKind::SearchPubmedLiterature => {
+                create_search_pubmed_literature_tool()
+            }
+            BiomedExternalDbToolKind::FetchPubmedRecord => create_fetch_pubmed_record_tool(),
+            BiomedExternalDbToolKind::ValidateCitations => create_validate_citations_tool(),
         }
     }
 
@@ -128,6 +171,18 @@ impl ToolExecutor<ToolInvocation> for BiomedExternalDbHandler {
             BiomedExternalDbToolKind::SearchUniprot => {
                 let args: SearchUniprotArgs = parse_arguments(&arguments)?;
                 search_uniprot(args).await?
+            }
+            BiomedExternalDbToolKind::SearchPubmedLiterature => {
+                let args: SearchPubmedLiteratureArgs = parse_arguments(&arguments)?;
+                search_pubmed_literature(args).await?
+            }
+            BiomedExternalDbToolKind::FetchPubmedRecord => {
+                let args: FetchPubmedRecordArgs = parse_arguments(&arguments)?;
+                fetch_pubmed_record(args).await?
+            }
+            BiomedExternalDbToolKind::ValidateCitations => {
+                let args: ValidateCitationsArgs = parse_arguments(&arguments)?;
+                validate_citations(args).await?
             }
         };
 
@@ -454,13 +509,25 @@ async fn fetch_genbank_record_from_db(
     db: GenbankDb,
     format: GenbankFormat,
 ) -> Result<String, FunctionCallError> {
-    let mut query = vec![
-        ("db", db.as_entrez_db().to_string()),
-        ("id", accession.to_string()),
-        ("rettype", format.rettype().to_string()),
-        ("retmode", "text".to_string()),
-        ("tool", "codex-for-med".to_string()),
-    ];
+    let mut query = ncbi_common_query();
+    query.push(("db", db.as_entrez_db().to_string()));
+    query.push(("id", accession.to_string()));
+    query.push(("rettype", format.rettype().to_string()));
+    query.push(("retmode", "text".to_string()));
+
+    http_get_text_with_query(client, NCBI_EFETCH_URL, &query).await
+}
+
+/// Query parameters every NCBI E-utilities request should carry: the `tool`
+/// identifier plus the optional `email`/`api_key` credentials that raise the
+/// rate limit from 3 to 10 requests per second.
+///
+/// The 3/s floor is per source IP and easy to exceed: these tools allow parallel
+/// calls, and `search_pubmed_literature` alone spends two requests. Without
+/// `NCBI_API_KEY`, concurrent PubMed calls answer 429. The live tests must run
+/// with `--test-threads=1` for the same reason.
+fn ncbi_common_query() -> Vec<(&'static str, String)> {
+    let mut query = vec![("tool", "codex-for-med".to_string())];
     if let Ok(email) = std::env::var("NCBI_EMAIL")
         && !email.trim().is_empty()
     {
@@ -471,8 +538,7 @@ async fn fetch_genbank_record_from_db(
     {
         query.push(("api_key", api_key));
     }
-
-    http_get_text_with_query(client, NCBI_EFETCH_URL, &query).await
+    query
 }
 
 async fn http_get_text(client: &reqwest::Client, url: &str) -> Result<String, FunctionCallError> {
@@ -879,6 +945,13 @@ fn truncate_for_error(text: &str) -> String {
 mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
+
+    #[test]
+    fn ncbi_common_query_always_identifies_the_tool() {
+        let query = ncbi_common_query();
+
+        assert_eq!(query.first(), Some(&("tool", "codex-for-med".to_string())));
+    }
 
     #[test]
     fn parses_fasta_headers_and_sequences() {
