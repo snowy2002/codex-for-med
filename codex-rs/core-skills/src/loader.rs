@@ -109,6 +109,7 @@ const AGENTS_DIR_NAME: &str = ".agents";
 const SKILLS_METADATA_DIR: &str = "agents";
 const SKILLS_METADATA_FILENAME: &str = "openai.yaml";
 const SKILLS_DIR_NAME: &str = "skills";
+const CODEX_MANAGED_PACKAGE_ROOT_ENV_VAR: &str = "CODEX_MANAGED_PACKAGE_ROOT";
 const MAX_NAME_LEN: usize = 64;
 const MAX_DESCRIPTION_LEN: usize = 1024;
 const MAX_SHORT_DESCRIPTION_LEN: usize = MAX_DESCRIPTION_LEN;
@@ -238,11 +239,14 @@ pub(crate) async fn skill_roots(
 ) -> Vec<SkillRoot> {
     let home_dir =
         home_dir().and_then(|path| AbsolutePathBuf::from_absolute_path_checked(path).ok());
+    let managed_package_root = std::env::var_os(CODEX_MANAGED_PACKAGE_ROOT_ENV_VAR)
+        .and_then(|path| AbsolutePathBuf::from_absolute_path_checked(PathBuf::from(path)).ok());
     skill_roots_with_home_dir(
         fs,
         config_layer_stack,
         cwd,
         home_dir.as_ref(),
+        managed_package_root.as_ref(),
         plugin_skill_roots,
     )
     .await
@@ -253,9 +257,22 @@ async fn skill_roots_with_home_dir(
     config_layer_stack: &ConfigLayerStack,
     cwd: &AbsolutePathBuf,
     home_dir: Option<&AbsolutePathBuf>,
+    managed_package_root: Option<&AbsolutePathBuf>,
     plugin_skill_roots: Vec<PluginSkillRoot>,
 ) -> Vec<SkillRoot> {
     let mut roots = skill_roots_from_layer_stack_inner(config_layer_stack, home_dir, fs.clone());
+    if let Some(managed_package_skills_root) = managed_package_root
+        .map(|root| root.join(SKILLS_DIR_NAME))
+        .filter(|root| root.as_path().is_dir())
+    {
+        roots.push(SkillRoot {
+            path: managed_package_skills_root,
+            scope: SkillScope::System,
+            file_system: Arc::clone(&LOCAL_FS),
+            plugin_id: None,
+            plugin_root: None,
+        });
+    }
     roots.extend(plugin_skill_roots.into_iter().map(|root| SkillRoot {
         path: root.path,
         scope: SkillScope::User,
@@ -1051,7 +1068,15 @@ pub(crate) async fn skill_roots_from_layer_stack(
     cwd: &AbsolutePathBuf,
     home_dir: Option<&AbsolutePathBuf>,
 ) -> Vec<SkillRoot> {
-    skill_roots_with_home_dir(Some(fs), config_layer_stack, cwd, home_dir, Vec::new()).await
+    skill_roots_with_home_dir(
+        Some(fs),
+        config_layer_stack,
+        cwd,
+        home_dir,
+        None,
+        Vec::new(),
+    )
+    .await
 }
 
 #[cfg(test)]

@@ -1447,6 +1447,52 @@ async fn loads_skills_from_repo_root() {
 }
 
 #[tokio::test]
+async fn loads_skills_from_managed_package_root() {
+    let codex_home = tempfile::tempdir().expect("tempdir");
+    let managed_package_root = tempfile::tempdir().expect("tempdir");
+    let skills_root = managed_package_root.path().join(SKILLS_DIR_NAME);
+    let skill_path = write_skill_at(
+        &skills_root,
+        "codex-med-science-workbench",
+        "codex-med-science-workbench",
+        "Literature retrieval workflow",
+    );
+    let cfg = make_config(&codex_home).await;
+    let managed_package_root_abs = managed_package_root.path().abs();
+
+    let roots = skill_roots_with_home_dir(
+        Some(Arc::clone(&LOCAL_FS)),
+        &cfg.config_layer_stack,
+        &cfg.cwd,
+        None,
+        Some(&managed_package_root_abs),
+        Vec::new(),
+    )
+    .await;
+    let outcome = load_skills_from_roots(roots).await;
+
+    assert!(
+        outcome.errors.is_empty(),
+        "unexpected errors: {:?}",
+        outcome.errors
+    );
+    assert_eq!(
+        outcome.skills,
+        vec![SkillMetadata {
+            name: "codex-med-science-workbench".to_string(),
+            description: "Literature retrieval workflow".to_string(),
+            short_description: None,
+            interface: None,
+            dependencies: None,
+            policy: None,
+            path_to_skills_md: normalized(&skill_path),
+            scope: SkillScope::System,
+            plugin_id: None,
+        }]
+    );
+}
+
+#[tokio::test]
 async fn loads_skills_from_agents_dir_without_codex_dir() {
     let codex_home = tempfile::tempdir().expect("tempdir");
     let repo_dir = tempfile::tempdir().expect("tempdir");
