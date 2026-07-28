@@ -17,6 +17,8 @@ RESPONSES_API_PROXY_NPM_ROOT = REPO_ROOT / "codex-rs" / "responses-api-proxy" / 
 CODEX_SDK_ROOT = REPO_ROOT / "sdk" / "typescript"
 CODEX_NPM_NAME = "@gair/codex-med"
 CODEX_PACKAGE_COMPONENT = "codex-package"
+CODEX_MED_SKILL_NAME = "codex-med-science-workbench"
+CODEX_MED_SKILL_ROOT = REPO_ROOT / ".codex" / "skills" / CODEX_MED_SKILL_NAME
 
 # `npm_name` is the local optional-dependency alias consumed by `bin/codex.js`.
 # The underlying package published to npm is always `@gair/codex-med`.
@@ -194,6 +196,7 @@ def stage_sources(staging_dir: Path, version: str, package: str) -> None:
         bin_dir = staging_dir / "bin"
         bin_dir.mkdir(parents=True, exist_ok=True)
         shutil.copy2(CODEX_CLI_ROOT / "bin" / "codex.js", bin_dir / "codex.js")
+        stage_codex_med_skill(staging_dir)
 
         readme_src = REPO_ROOT / "README.md"
         if readme_src.exists():
@@ -252,7 +255,7 @@ def stage_sources(staging_dir: Path, version: str, package: str) -> None:
         package_json["version"] = version
 
     if package == "codex":
-        package_json["files"] = ["bin/codex.js"]
+        package_json["files"] = ["bin/codex.js", "skills"]
         package_json["optionalDependencies"] = {
             CODEX_PLATFORM_PACKAGES[platform_package]["npm_name"]: (
                 f"npm:{CODEX_NPM_NAME}@"
@@ -282,6 +285,21 @@ def compute_platform_package_version(version: str, platform_tag: str) -> str:
     # npm forbids republishing the same package name/version, so each
     # platform-specific tarball needs a unique version string.
     return f"{version}-{platform_tag}"
+
+
+def stage_codex_med_skill(staging_dir: Path) -> None:
+    skill_file = CODEX_MED_SKILL_ROOT / "SKILL.md"
+    if not skill_file.is_file():
+        raise RuntimeError(
+            f"Codex Med literature workflow skill not found: {skill_file}"
+        )
+
+    skills_dir = staging_dir / "skills"
+    skills_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(
+        CODEX_MED_SKILL_ROOT,
+        skills_dir / CODEX_MED_SKILL_NAME,
+    )
 
 
 def run_command(cmd: list[str], cwd: Path | None = None) -> None:
