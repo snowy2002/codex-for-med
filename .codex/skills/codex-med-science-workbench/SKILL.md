@@ -1,77 +1,173 @@
 ---
 name: codex-med-science-workbench
-description: Choose and use codex-med science workbench tools for biomedical research requests. Use when the user asks to inspect available medical knowledge backends, describe the codex-med database, make a durable literature/evidence map, compare local vector knowledge with PubMed, create research_projects evidence packages, or decide between list_med_knowledge_collections, describe_med_database, literature_map, and pubmed_literature_map.
+description: Route and chain codex-med biomedical retrieval, literature-map, citation-validation, review-resolution, and PubMed vector-reconciliation tools into reproducible research workflows. Use when the user asks for quick PubMed evidence, a durable local or PubMed literature map, comparison of local knowledge with public literature, citation verification, ingestion of retrieved PubMed records into Qdrant, repair of incomplete vector coverage, resolution of possible-duplicate literature records, or inspection of available medical databases.
 ---
 
 # Codex Med Science Workbench
 
-Use this skill to route biomedical research requests to the right codex-med tool and to keep generated evidence packages reproducible.
+Choose the smallest workflow that produces the artifact the user wants. Keep all
+durable steps for one project in the same workspace so they share the literature
+registry and project manifest.
 
-## Tool Routing
+## Route by Intended Result
 
-Start with the user's intended artifact.
+- Use `list_med_knowledge_collections` to discover available SQL and vector
+  backends when the source is unknown.
+- Use `describe_med_database` to inspect schemas, payload fields, row counts, or
+  collection metadata before constructing a structured query.
+- Use `search_vector_knowledge` for a quick semantic lookup from local knowledge
+  without writing project files.
+- Use `search_pubmed_literature` for a quick PubMed result list when PMIDs are
+  unknown and no durable project is requested.
+- Use `fetch_pubmed_record` to fetch the abstract and MeSH terms of a selected
+  PMID.
+- Use `validate_citations` to verify DOI, title, and author metadata against
+  Crossref. Do not treat this metadata check as proof that a paper supports a
+  scientific claim.
+- Use `literature_map` to create a durable evidence package from the local
+  codex-med vector collection.
+- Use `pubmed_literature_map` to create a durable PubMed package, register
+  canonical literature identities, and optionally ingest complete records into
+  Qdrant.
+- Use `resolve_literature_review` only after a human decides whether a
+  possible-duplicate pair is the same publication.
+- Use `reconcile_pubmed_vectors` to verify or repair vector coverage for PubMed
+  records already present in the workspace registry.
 
-- Use `list_med_knowledge_collections` when the user asks what medical knowledge sources are available, what backends exist, or how to choose a retrieval source.
-- Use `describe_med_database` when the user needs schema, table purpose, row counts, vector collection metadata, payload fields, categories, or deployed database details.
-- Use `literature_map` when the user wants a durable evidence package from the local codex-med vector knowledge base. Prefer it for curated/local knowledge, offline-style package creation, and requests that mention `research_projects/<project_id>` without requiring live PubMed.
-- Use `pubmed_literature_map` when the user asks for PubMed, PMID, MeSH, abstracts, recent papers, public literature search, NCBI, or an external literature map. Also use it when the user wants a new PubMed-backed workflow without changing the existing vector-only `literature_map`.
+For a short answer in chat, do not create a project unless the user asks for
+saved files, a literature map, provenance, an export, or a reusable workflow.
 
-If the user asks for a quick answer or a few citations in chat, do not create a project package unless they ask for a map, workflow, export, report, provenance, or saved files.
+## Chain Quick PubMed Evidence
 
-## Workflow Order
+Use this sequence for a small answer without project files:
 
-For unfamiliar biomedical tasks, call tools in this order:
+1. Call `search_pubmed_literature`.
+2. Inspect `query_degraded` and `query_translation`. Correct and rerun the query
+   if PubMed dropped or widened a qualifier.
+3. Select relevant PMIDs from the returned metadata.
+4. Call `fetch_pubmed_record` only for records whose abstracts or MeSH terms are
+   needed.
+5. Call `validate_citations` for DOI-bearing references when citation identity
+   matters.
+6. Separate verified metadata from the model's assessment of claim support in
+   the final answer.
 
-1. `list_med_knowledge_collections` to see available sources.
-2. `describe_med_database` if source schemas or collection contents matter.
-3. Choose one map workflow:
-   - `literature_map` for local vector evidence.
-   - `pubmed_literature_map` for live PubMed evidence.
+Do not fetch every record by default. Keep discovery broad and evidence
+extraction selective.
 
-Do not call both map tools by default. Use both only when the user asks to compare local/codex-med evidence against PubMed or when one source is clearly insufficient for the question.
+## Build a Durable Literature Project
 
-## Parameter Guidance
+### Local knowledge
 
-For both map tools:
+1. Discover or describe the backend only when its contents are unfamiliar.
+2. Call `literature_map` with a clear `topic`, a stable `project_id`, and the
+   requested `top_k`.
+3. Inspect `literature/local/literature_ids.csv`, `report.md`, the immutable run
+   snapshot, and provenance before summarizing.
 
-- Always provide a clear `topic`.
-- Set `project_id` when the user names a project or when rerunning/appending to an existing project.
-- Keep IDs filesystem-safe and stable across reruns.
+### PubMed
 
-For `literature_map`:
+1. Call `pubmed_literature_map` directly with a clear `topic` and stable
+   `project_id`.
+2. Supply `pubmed_query` for Boolean expressions, field tags, author or journal
+   filters, and exact PMID searches.
+3. Set `min_year` and `max_year` together. Use `sort: "pub_date"` for recent
+   papers and relevance otherwise.
+4. Keep `fetch_abstracts` enabled for evidence work. Disable it only for a fast
+   metadata inventory.
+5. Enable `validate_citations` when DOI metadata must be checked in the same
+   durable run.
+6. Inspect `fetch_errors`, `citation_validation`, `query_degraded` in
+   provenance, `vector_statuses`, and `incomplete_vectors`.
+7. Review `literature/pubmed/literature_ids.csv`, `report.md`, citations,
+   snapshot, provenance, and the merged project manifest.
 
-- Use `top_k` for the number of distinct local documents to keep.
-- Use `category` only when the user specifies a known vector category or asks to constrain local retrieval.
-- Use `year_range` as a report label; it does not perform PubMed-style date filtering.
+Do not manually call `search_pubmed_literature` and `fetch_pubmed_record` before
+`pubmed_literature_map` unless previewing the query is necessary. The map tool
+already performs search, detail fetching, registration, artifact creation,
+citation validation, and vector-ingestion bookkeeping.
 
-For `pubmed_literature_map`:
+### Compare local knowledge with PubMed
 
-- Use `pubmed_query` when the user supplies Boolean logic, field tags, journal filters, author filters, or an exact PubMed query.
-- Use `min_year` and `max_year` together for publication-year filtering.
-- Use `sort: "pub_date"` for newest/recent-paper requests; otherwise use relevance.
-- Keep `retmax` modest unless the user explicitly asks for broad coverage.
-- Leave `fetch_abstracts` enabled unless the user wants fast metadata-only output.
+1. Use one stable `project_id`.
+2. Run `literature_map` for local curated evidence.
+3. Run `pubmed_literature_map` for public evidence.
+4. Compare canonical outputs under `literature/local/` and
+   `literature/pubmed/`.
+5. Report overlap, source-specific records, ranking differences, and search
+   limitations. Do not merge the two ranked CSV files manually; let the shared
+   registry and project manifest preserve identity and provenance.
 
-## Expected Outputs
+## Ingest Retrieved PubMed Literature
 
-Map workflows should create or update `research_projects/<project_id>/` with standard project structure:
+Treat vector ingestion as an explicit state-changing workflow.
 
-- `literature/` for records, reports, and citations.
-- `code/` for downstream analysis scripts or notebooks.
-- `analysis/` for derived tables and analysis notes.
-- `figures/` for plots and visual outputs.
-- `provenance/` for run metadata.
-- `project.json` at the project root as the run registry.
+1. Confirm that the user requested or authorized vector writes.
+2. Start Codex Med with these runtime settings:
+   - `CODEX_MED_PUBMED_VECTOR_WRITES=1`
+   - an explicit `CODEX_MED_VECTOR_COLLECTION`
+   - `CODEX_MED_VECTOR_QDRANT_API_KEY` when Qdrant requires authentication
+   - `CODEX_MED_EMBEDDING_API_KEY` when the embedding service requires
+     authentication
+3. Refuse to test against the production collection when a disposable
+   collection is intended.
+4. Before the first authorized write to the default production collection, run
+   `literature_map` once in the same workspace with
+   `CODEX_MED_INITIALIZE_LITERATURE_BASELINE=1`. Inspect
+   `baseline_initialization` in provenance, then remove the initialization
+   flag. Do not bypass a missing or invalid production baseline.
+5. Call `pubmed_literature_map` with `require_vector_complete: true` when the
+   task requires an ingestion guarantee.
+6. Declare success only when `vector_complete` is true and every record has
+   status `complete` or `already_vectorized`.
+7. Treat `vector_write_disabled`, `possible_duplicate`, `blocked_conflict`,
+   `failed`, missing points, or any other status as incomplete even if
+   literature files were created.
 
-Do not overwrite or repurpose the vector-only `literature_map` output contract when using PubMed. The PubMed workflow must remain a separate tool and workflow name.
+Keep vector writes disabled for ordinary retrieval and literature-map requests.
+Never place secret values in project artifacts, prompts, reports, or provenance.
 
-## Response Style
+## Recover Incomplete Ingestion
 
-After using a map workflow, summarize:
+Use the returned status to choose the next tool:
 
-- Which tool ran and why.
-- The project path and key files written.
-- Record count and important filters such as query, years, sort, and abstract fetching.
-- Any degraded search behavior or per-record fetch errors.
+- For `possible_duplicate`, `blocked_conflict`, or a `review_case_id`, show the
+  conflicting identities to the user and request an explicit same/different
+  decision. Call `resolve_literature_review` with the human rationale; never
+  infer approval from title or identifier similarity.
+- After resolving a review, call `reconcile_pubmed_vectors` for the affected
+  canonical literature ID.
+- For failed, stale, or missing vectors without an identity conflict, call
+  `reconcile_pubmed_vectors` with the affected `literature_ids` first. Omit IDs
+  only when the user requests a workspace-wide batch audit.
+- Inspect `complete`, `statuses`, `expected_points`, `verified_points`,
+  `verification_method`, and per-record errors after reconciliation.
+- Rerun the map only to refresh search results or regenerate project artifacts;
+  do not use repeated map runs as a substitute for reconciliation.
 
-Do not paste large records into chat when files were created. Point to the saved project artifacts instead.
+Keep `pubmed_literature_map`, `resolve_literature_review`, and
+`reconcile_pubmed_vectors` in the same working directory. Their registry is
+workspace-local.
+
+## Preserve Project Invariants
+
+- Reuse the same filesystem-safe `project_id` across reruns.
+- Preserve separate `literature/local/` and `literature/pubmed/` ranked outputs.
+- Treat immutable run snapshots and provenance as the audit record.
+- Do not edit the SQLite literature registry or vector job rows manually.
+- Do not claim that file creation proves vector ingestion or citation validity.
+- Prefer targeted recovery by literature ID before workspace-wide repair.
+
+## Report Results
+
+After a workflow, report:
+
+- the tools called and why they were chained;
+- the workspace and project path;
+- query, filters, sort order, and returned record count;
+- key files and provenance written;
+- citation-validation and query-degradation warnings;
+- vector-write setting, collection, status counts, and completeness;
+- pending review IDs, fetch errors, or recommended recovery steps.
+
+Point to saved artifacts instead of pasting large records into chat.
