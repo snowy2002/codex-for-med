@@ -1796,6 +1796,107 @@ fn pubmed_year_from_date(value: &str) -> Option<String> {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    #[ignore = "requires live PubMed, embedding, and a disposable Qdrant collection"]
+    async fn real_pubmed_vector_workflow_sandbox() {
+        let collection =
+            required_env("CODEX_MED_VECTOR_COLLECTION").expect("sandbox collection must be set");
+        assert!(
+            collection.starts_with("codex_med_it_"),
+            "refusing to run against a non-sandbox collection"
+        );
+        assert_eq!(
+            std::env::var("CODEX_MED_PUBMED_VECTOR_WRITES").as_deref(),
+            Ok("1"),
+            "sandbox vector writes must be enabled explicitly"
+        );
+        required_env("CODEX_MED_VECTOR_QDRANT_API_KEY").expect("Qdrant API key must be set");
+        required_env("CODEX_MED_EMBEDDING_API_KEY").expect("embedding API key must be set");
+
+        let temp = tempfile::tempdir().expect("temporary workspace");
+        let client = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(90))
+            .build()
+            .expect("HTTP client");
+        let qdrant = QdrantRuntimeConfig::from_environment(None, None)
+            .expect("valid sandbox Qdrant configuration");
+        assert_eq!(
+            qdrant_count(&client, &qdrant, None)
+                .await
+                .expect("initial sandbox count"),
+            0,
+            "sandbox collection must start empty"
+        );
+
+        let args = || PubmedLiteratureMapArgs {
+            topic: "Integrated stress response, aging, and disease".to_string(),
+            pubmed_query: Some("33301246[PMID]".to_string()),
+            project_id: Some("codex-med-real-pubmed-it".to_string()),
+            retmax: 1,
+            sort: PubmedMapSort::Relevance,
+            min_year: None,
+            max_year: None,
+            fetch_abstracts: true,
+            max_mesh_terms: 50,
+            validate_citations: false,
+            force_refresh: false,
+            require_vector_complete: true,
+        };
+
+        let first: Value = serde_json::from_str(
+            &pubmed_literature_map(&client, args(), temp.path())
+                .await
+                .expect("first real PubMed vector workflow"),
+        )
+        .expect("first workflow JSON");
+        assert_eq!(first["returned"], 1);
+        assert_eq!(first["vector_complete"], true);
+        assert_eq!(first["vector_statuses"]["complete"], 1);
+        for artifact in first["created_files"].as_array().expect("created files") {
+            let artifact = artifact.as_str().expect("artifact path");
+            let artifact_path = Path::new(artifact);
+            let artifact_path = if artifact_path.is_absolute() {
+                artifact_path.to_path_buf()
+            } else {
+                temp.path().join(artifact_path)
+            };
+            assert!(
+                artifact_path.exists(),
+                "missing artifact: {}",
+                artifact_path.display()
+            );
+        }
+        assert!(
+            temp.path()
+                .join(".codex-med")
+                .join("literatures.sqlite3")
+                .exists(),
+            "literature registry was not created"
+        );
+        let first_count = qdrant_count(&client, &qdrant, None)
+            .await
+            .expect("count after first workflow");
+        assert!(first_count > 0, "first workflow did not write vectors");
+
+        let second: Value = serde_json::from_str(
+            &pubmed_literature_map(&client, args(), temp.path())
+                .await
+                .expect("repeated real PubMed vector workflow"),
+        )
+        .expect("second workflow JSON");
+        assert_eq!(second["returned"], 1);
+        assert_eq!(second["vector_complete"], true);
+        assert_eq!(second["vector_statuses"]["already_vectorized"], 1);
+        assert_eq!(
+            qdrant_count(&client, &qdrant, None)
+                .await
+                .expect("count after repeated workflow"),
+            first_count,
+            "repeated workflow duplicated vectors"
+        );
+    }
+
     #[test]
     fn pubmed_year_range_requires_complete_ordered_window() {
         assert_eq!(pubmed_map_year_range(None, None).ok(), Some(None));
