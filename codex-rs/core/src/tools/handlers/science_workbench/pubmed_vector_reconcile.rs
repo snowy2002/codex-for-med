@@ -1,0 +1,261 @@
+//! Batch reconciliation for PubMed literature vectors.
+
+use crate::function_tool::FunctionCallError;
+use serde::Deserialize;
+use serde_json::json;
+use sqlx::Row;
+use std::collections::BTreeMap;
+use std::collections::HashSet;
+use std::path::Path;
+
+use super::literature_artifacts::new_run_id;
+use super::literature_registry::Literature;
+use super::literature_registry::LiteratureRegistry;
+use super::pretty_json;
+use super::pubmed_vector_ingest::PubmedVectorConfig;
+use super::pubmed_vector_ingest::PubmedVectorIngestor;
+use super::relative_display;
+
+#[derive(Debug, Deserialize)]
+pub(super) struct ReconcilePubmedVectorsArgs {
+    #[serde(default)]
+    literature_ids: Option<Vec<String>>,
+    #[serde(default = "default_limit")]
+    limit: usize,
+}
+
+fn default_limit() -> usize {
+    100
+}
+
+pub(super) async fn reconcile_pubmed_vectors(
+    client: &reqwest::Client,
+    args: ReconcilePubmedVectorsArgs,
+    cwd: &Path,
+) -> Result<String, FunctionCallError> {
+    let started_at = chrono::Utc::now();
+    let run_id = new_run_id(&started_at, "reconcile_pubmed_vectors");
+    let registry = LiteratureRegistry::open_workspace(cwd)
+        .await
+        .map_err(|error| {
+            FunctionCallError::Fatal(format!("failed to open literature registry: {error:#}"))
+        })?;
+    let config = PubmedVectorConfig::from_environment().map_err(|error| {
+        FunctionCallError::RespondToModel(format!("invalid PubMed vector configuration: {error:#}"))
+    })?;
+    let collection = config.collection_name().to_string();
+    let writes_enabled = config.write_enabled();
+    let registry_backup = if writes_enabled {
+        let backup = cwd
+            .join(".codex-med")
+            .join("backups")
+            .join(format!("literatures_before_{run_id}.sqlite3"));
+        registry.backup_to(&backup).await.map_err(|error| {
+            FunctionCallError::Fatal(format!(
+                "refusing vector reconciliation because the registry backup failed: {error:#}"
+            ))
+        })?;
+        Some(relative_display(cwd, &backup))
+    } else {
+        None
+    };
+    let literatures =
+        select_pubmed_literatures(&registry, args.literature_ids.as_deref(), args.limit).await?;
+    let ingestor = PubmedVectorIngestor::new(client, config);
+    let mut statuses = BTreeMap::<String, usize>::new();
+    let mut results = Vec::with_capacity(literatures.len());
+
+    for literature in literatures {
+        let review_case_id =
+            pending_vector_review_case(&registry, &literature.literature_id, &collection)
+                .await
+                .map_err(|error| {
+                    FunctionCallError::Fatal(format!(
+                        "failed to read vector review state for {}: {error:#}",
+                        literature.literature_id
+                    ))
+                })?;
+        let result = ingestor
+            .ingest(
+                &registry,
+                &literature,
+                review_case_id.as_deref(),
+                chrono::Utc::now(),
+            )
+            .await;
+        *statuses.entry(result.status.clone()).or_default() += 1;
+        results.push(json!({
+            "literature_id": literature.literature_id,
+            "pmid": literature.pmid,
+            "status": result.status,
+            "expected_points": result.expected_points,
+            "verified_points": result.verified_points,
+            "existing_dataset": result.existing_dataset,
+            "existing_document_id": result.existing_document_id,
+            "verification_method": result.verification_method,
+            "review_case_id": result.review_case_id.or(review_case_id),
+            "error": result.error,
+        }));
+    }
+
+    let incomplete = results
+        .iter()
+        .filter(|result| {
+            !matches!(
+                result.get("status").and_then(serde_json::Value::as_str),
+                Some("complete" | "already_vectorized")
+            )
+        })
+        .count();
+    pretty_json(json!({
+        "run_id": run_id,
+        "started_at": started_at.to_rfc3339(),
+        "finished_at": chrono::Utc::now().to_rfc3339(),
+        "collection": collection,
+        "writes_enabled": writes_enabled,
+        "registry": relative_display(cwd, registry.path()),
+        "registry_backup": registry_backup,
+        "selected": results.len(),
+        "complete": incomplete == 0,
+        "complete_count": results.len() - incomplete,
+        "incomplete_count": incomplete,
+        "statuses": statuses,
+        "results": results,
+    }))
+}
+
+async fn select_pubmed_literatures(
+    registry: &LiteratureRegistry,
+    requested_ids: Option<&[String]>,
+    limit: usize,
+) -> Result<Vec<Literature>, FunctionCallError> {
+    let limit = limit.clamp(1, 500);
+    let ids = if let Some(requested_ids) = requested_ids {
+        requested_ids
+            .iter()
+            .map(|id| id.trim())
+            .filter(|id| !id.is_empty())
+            .take(limit)
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+    } else {
+        sqlx::query_scalar::<_, String>(
+            "SELECT literature_id FROM literatures WHERE pmid IS NOT NULL ORDER BY updated_at, literature_id LIMIT ?",
+        )
+        .bind(limit as i64)
+        .fetch_all(&registry.pool)
+        .await
+        .map_err(|error| {
+            FunctionCallError::Fatal(format!(
+                "failed to select PubMed literature for reconciliation: {error:#}"
+            ))
+        })?
+    };
+
+    let mut seen = HashSet::new();
+    let mut literatures = Vec::with_capacity(ids.len());
+    for id in ids {
+        let literature = registry
+            .get(&id)
+            .await
+            .map_err(|error| {
+                FunctionCallError::Fatal(format!(
+                    "failed to read literature {id} for reconciliation: {error:#}"
+                ))
+            })?
+            .ok_or_else(|| {
+                FunctionCallError::RespondToModel(format!(
+                    "unknown literature_id requested for reconciliation: {id}"
+                ))
+            })?;
+        if literature.pmid.is_none() {
+            return Err(FunctionCallError::RespondToModel(format!(
+                "literature_id {} is not a PubMed record",
+                literature.literature_id
+            )));
+        }
+        if seen.insert(literature.literature_id.clone()) {
+            literatures.push(literature);
+        }
+    }
+    Ok(literatures)
+}
+
+async fn pending_vector_review_case(
+    registry: &LiteratureRegistry,
+    literature_id: &str,
+    collection: &str,
+) -> anyhow::Result<Option<String>> {
+    let row = sqlx::query(
+        r#"
+        SELECT review_case_id
+        FROM literature_vector_jobs
+        WHERE literature_id = ?
+          AND collection_name = ?
+          AND status IN ('possible_duplicate', 'blocked_conflict')
+          AND review_case_id IS NOT NULL
+        "#,
+    )
+    .bind(literature_id)
+    .bind(collection)
+    .fetch_optional(&registry.pool)
+    .await?;
+    Ok(row.map(|row| row.try_get("review_case_id")).transpose()?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::literature_registry::LiteratureInput;
+    use super::super::literature_registry::RegistrationOutcome;
+    use super::*;
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn selects_all_pubmed_records_and_deduplicates_requested_ids() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let registry = LiteratureRegistry::open(temp.path().join("literatures.sqlite3"))
+            .await
+            .expect("registry");
+        let RegistrationOutcome::Registered(pubmed) = registry
+            .register(
+                LiteratureInput {
+                    pmid: Some("12345678".to_string()),
+                    title: Some("PubMed record".to_string()),
+                    metadata: json!({}),
+                    ..Default::default()
+                },
+                None,
+                "2026-01-01T00:00:00Z",
+            )
+            .await
+            .expect("register PubMed")
+        else {
+            panic!("expected PubMed registration");
+        };
+        registry
+            .register(
+                LiteratureInput {
+                    title: Some("Non-PubMed record".to_string()),
+                    metadata: json!({}),
+                    ..Default::default()
+                },
+                None,
+                "2026-01-01T00:00:00Z",
+            )
+            .await
+            .expect("register non-PubMed");
+
+        let selected = select_pubmed_literatures(&registry, None, 100)
+            .await
+            .expect("select all");
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].literature_id, pubmed.literature_id);
+
+        let requested = vec![pubmed.literature_id.clone(), pubmed.literature_id.clone()];
+        let selected = select_pubmed_literatures(&registry, Some(&requested), 100)
+            .await
+            .expect("select requested");
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].literature_id, pubmed.literature_id);
+    }
+}

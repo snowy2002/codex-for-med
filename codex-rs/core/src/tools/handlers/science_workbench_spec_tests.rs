@@ -51,4 +51,10 @@ fn creates_science_workbench_tool_specs() {
             .description
             .contains("explicit human confirmation")
     );
+
+    let ToolSpec::Function(reconcile_tool) = create_reconcile_pubmed_vectors_tool() else {
+        panic!("reconcile_pubmed_vectors should be a function tool");
+    };
+    assert_eq!(reconcile_tool.name, RECONCILE_PUBMED_VECTORS_TOOL_NAME);
+    assert!(reconcile_tool.description.contains("fills missing"));
 }

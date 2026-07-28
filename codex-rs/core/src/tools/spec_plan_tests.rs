@@ -492,6 +492,7 @@ async fn biomed_external_db_tools_are_core_visible_utilities() {
         "search_vector_knowledge",
         "pubmed_literature_map",
         "resolve_literature_review",
+        "reconcile_pubmed_vectors",
     ];
 
     plan.assert_visible_contains(&biomed_tools);

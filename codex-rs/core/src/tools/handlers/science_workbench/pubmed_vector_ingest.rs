@@ -252,10 +252,7 @@ impl<'a> PubmedVectorIngestor<'a> {
                                             &now.to_rfc3339(),
                                         )
                                         .await;
-                                    return existing_result(
-                                        existing,
-                                        "reviewed_source_document",
-                                    );
+                                    return existing_result(existing, "reviewed_source_document");
                                 }
                                 Ok(_) => {}
                                 Err(error) => {
@@ -402,6 +399,21 @@ impl<'a> PubmedVectorIngestor<'a> {
                     .record_failure(registry, literature, chunks.len(), error, now)
                     .await;
             }
+        }
+        if let Err(error) = registry
+            .reopen_terminal_vector_job_if_incomplete(
+                &literature.literature_id,
+                &self.config.collection,
+                PUBMED_EMBEDDING_PROFILE,
+                chunks.len(),
+                deterministic_ids.len(),
+                chrono::Utc::now(),
+            )
+            .await
+        {
+            return self
+                .record_failure(registry, literature, chunks.len(), error, now)
+                .await;
         }
 
         let lease = match registry
@@ -1321,7 +1333,10 @@ mod tests {
 
         assert_eq!(result.status, "already_vectorized");
         assert_eq!(result.existing_dataset.as_deref(), Some("data-extract-new"));
-        assert_eq!(result.existing_document_id.as_deref(), Some("local-full-text"));
+        assert_eq!(
+            result.existing_document_id.as_deref(),
+            Some("local-full-text")
+        );
         assert_eq!(result.expected_points, 2);
         assert_eq!(result.verified_points, 2);
         assert_eq!(result.verification_method, "strong_identifier_document");
@@ -1514,12 +1529,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn partial_import_embeds_and_upserts_only_missing_chunks() {
+    async fn terminal_job_with_qdrant_drift_upserts_only_missing_chunks() {
         let server = MockServer::start().await;
         let abstract_text = format!("{}。{}", "a".repeat(1_100), "b".repeat(1_100));
         let (_temp, registry, literature) = registry_literature_with_abstract(abstract_text).await;
         let chunks = build_pubmed_chunks(&literature);
         assert_eq!(chunks.len(), 2);
+        registry
+            .record_vector_status(
+                &literature.literature_id,
+                "temporary",
+                PUBMED_EMBEDDING_PROFILE,
+                "complete",
+                None,
+                None,
+                None,
+                &test_now().to_rfc3339(),
+            )
+            .await
+            .expect("record stale terminal status");
         Mock::given(method("POST"))
             .and(path("/collections/temporary/points/scroll"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({

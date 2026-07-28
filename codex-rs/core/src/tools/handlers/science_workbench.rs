@@ -8,11 +8,13 @@ use crate::tools::handlers::science_workbench_spec::DESCRIBE_MED_DATABASE_TOOL_N
 use crate::tools::handlers::science_workbench_spec::LIST_MED_KNOWLEDGE_COLLECTIONS_TOOL_NAME;
 use crate::tools::handlers::science_workbench_spec::LITERATURE_MAP_TOOL_NAME;
 use crate::tools::handlers::science_workbench_spec::PUBMED_LITERATURE_MAP_TOOL_NAME;
+use crate::tools::handlers::science_workbench_spec::RECONCILE_PUBMED_VECTORS_TOOL_NAME;
 use crate::tools::handlers::science_workbench_spec::RESOLVE_LITERATURE_REVIEW_TOOL_NAME;
 use crate::tools::handlers::science_workbench_spec::create_describe_med_database_tool;
 use crate::tools::handlers::science_workbench_spec::create_list_med_knowledge_collections_tool;
 use crate::tools::handlers::science_workbench_spec::create_literature_map_tool;
 use crate::tools::handlers::science_workbench_spec::create_pubmed_literature_map_tool;
+use crate::tools::handlers::science_workbench_spec::create_reconcile_pubmed_vectors_tool;
 use crate::tools::handlers::science_workbench_spec::create_resolve_literature_review_tool;
 use crate::tools::registry::CoreToolRuntime;
 use crate::tools::registry::ToolExecutor;
@@ -51,6 +53,8 @@ mod pubmed_cache;
 mod pubmed_chunks;
 #[path = "science_workbench/pubmed_vector_ingest.rs"]
 mod pubmed_vector_ingest;
+#[path = "science_workbench/pubmed_vector_reconcile.rs"]
+mod pubmed_vector_reconcile;
 use self::literature_artifacts::commit_literature_run;
 use self::literature_artifacts::new_run_id;
 use self::literature_artifacts::recover_incomplete_literature_runs;
@@ -65,6 +69,8 @@ use self::literature_registry_identity::identifiers_from_source_uri;
 use self::literature_registry_identity::paper_id_from_source_uri;
 use self::pubmed_vector_ingest::PubmedVectorConfig;
 use self::pubmed_vector_ingest::PubmedVectorIngestor;
+use self::pubmed_vector_reconcile::ReconcilePubmedVectorsArgs;
+use self::pubmed_vector_reconcile::reconcile_pubmed_vectors;
 #[path = "science_workbench/project_manifest.rs"]
 mod project_manifest;
 #[path = "science_workbench/rerank.rs"]
@@ -99,6 +105,7 @@ enum ScienceWorkbenchToolKind {
     LiteratureMap,
     PubmedLiteratureMap,
     ResolveLiteratureReview,
+    ReconcilePubmedVectors,
 }
 
 pub struct ScienceWorkbenchHandler {
@@ -130,6 +137,10 @@ impl ScienceWorkbenchHandler {
         Self::new(ScienceWorkbenchToolKind::ResolveLiteratureReview)
     }
 
+    pub fn reconcile_pubmed_vectors() -> Self {
+        Self::new(ScienceWorkbenchToolKind::ReconcilePubmedVectors)
+    }
+
     fn client() -> Result<reqwest::Client, FunctionCallError> {
         reqwest::Client::builder()
             .timeout(HTTP_TIMEOUT)
@@ -153,6 +164,7 @@ impl ToolExecutor<ToolInvocation> for ScienceWorkbenchHandler {
             ScienceWorkbenchToolKind::ResolveLiteratureReview => {
                 RESOLVE_LITERATURE_REVIEW_TOOL_NAME
             }
+            ScienceWorkbenchToolKind::ReconcilePubmedVectors => RECONCILE_PUBMED_VECTORS_TOOL_NAME,
         })
     }
 
@@ -166,6 +178,9 @@ impl ToolExecutor<ToolInvocation> for ScienceWorkbenchHandler {
             ScienceWorkbenchToolKind::PubmedLiteratureMap => create_pubmed_literature_map_tool(),
             ScienceWorkbenchToolKind::ResolveLiteratureReview => {
                 create_resolve_literature_review_tool()
+            }
+            ScienceWorkbenchToolKind::ReconcilePubmedVectors => {
+                create_reconcile_pubmed_vectors_tool()
             }
         }
     }
@@ -215,6 +230,12 @@ impl ToolExecutor<ToolInvocation> for ScienceWorkbenchHandler {
                 #[allow(deprecated)]
                 let cwd = turn.cwd.as_path();
                 resolve_literature_review(args, cwd).await?
+            }
+            ScienceWorkbenchToolKind::ReconcilePubmedVectors => {
+                let args: ReconcilePubmedVectorsArgs = parse_arguments(&arguments)?;
+                #[allow(deprecated)]
+                let cwd = turn.cwd.as_path();
+                reconcile_pubmed_vectors(&client, args, cwd).await?
             }
         };
 

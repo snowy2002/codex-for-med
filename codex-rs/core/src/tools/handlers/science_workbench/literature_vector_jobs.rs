@@ -157,6 +157,42 @@ impl LiteratureRegistry {
         }))
     }
 
+    pub(super) async fn reopen_terminal_vector_job_if_incomplete(
+        &self,
+        literature_id: &str,
+        collection_name: &str,
+        embedding_profile: &str,
+        expected_point_count: usize,
+        verified_point_count: usize,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool> {
+        let result = sqlx::query(
+            r#"
+            UPDATE literature_vector_jobs SET
+                embedding_profile = ?,
+                status = 'pending',
+                expected_point_count = ?,
+                verified_point_count = ?,
+                owner_token = NULL,
+                lease_expires_at = NULL,
+                last_error = 'Qdrant completeness check found missing deterministic points',
+                updated_at = ?
+            WHERE literature_id = ?
+              AND collection_name = ?
+              AND status IN ('complete', 'already_vectorized')
+            "#,
+        )
+        .bind(embedding_profile)
+        .bind(expected_point_count as i64)
+        .bind(verified_point_count as i64)
+        .bind(now.to_rfc3339())
+        .bind(literature_id)
+        .bind(collection_name)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
     pub(super) async fn update_claimed_vector_job(
         &self,
         lease: &VectorLease,

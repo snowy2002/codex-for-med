@@ -8,6 +8,7 @@ pub const DESCRIBE_MED_DATABASE_TOOL_NAME: &str = "describe_med_database";
 pub const LITERATURE_MAP_TOOL_NAME: &str = "literature_map";
 pub const PUBMED_LITERATURE_MAP_TOOL_NAME: &str = "pubmed_literature_map";
 pub const RESOLVE_LITERATURE_REVIEW_TOOL_NAME: &str = "resolve_literature_review";
+pub const RECONCILE_PUBMED_VECTORS_TOOL_NAME: &str = "reconcile_pubmed_vectors";
 
 pub fn create_list_med_knowledge_collections_tool() -> ToolSpec {
     ToolSpec::Function(ResponsesApiTool {
@@ -260,6 +261,36 @@ pub fn create_resolve_literature_review_tool() -> ToolSpec {
             ]),
             Some(false.into()),
         ),
+        output_schema: None,
+    })
+}
+
+pub fn create_reconcile_pubmed_vectors_tool() -> ToolSpec {
+    let properties = BTreeMap::from([
+        (
+            "literature_ids".to_string(),
+            JsonSchema::array(
+                JsonSchema::string(None),
+                Some(
+                    "Optional literature IDs to reconcile. When omitted, scans PubMed records from the workspace registry in stable update order."
+                        .to_string(),
+                ),
+            ),
+        ),
+        (
+            "limit".to_string(),
+            JsonSchema::integer(Some(
+                "Maximum records to process, capped at 500. Defaults to 100.".to_string(),
+            )),
+        ),
+    ]);
+    ToolSpec::Function(ResponsesApiTool {
+        name: RECONCILE_PUBMED_VECTORS_TOOL_NAME.to_string(),
+        description: "Audit and repair PubMed vector coverage in batch by reusing the existing idempotent ingestion pipeline. It verifies representations, retries failed jobs, fills missing deterministic chunks, and reclaims expired leases. Qdrant writes remain subject to CODEX_MED_PUBMED_VECTOR_WRITES and all production safety preconditions."
+            .to_string(),
+        strict: false,
+        defer_loading: None,
+        parameters: JsonSchema::object(properties, None, Some(false.into())),
         output_schema: None,
     })
 }

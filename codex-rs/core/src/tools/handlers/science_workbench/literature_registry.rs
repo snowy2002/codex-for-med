@@ -1767,4 +1767,57 @@ mod tests {
         assert_eq!(first.job_id, second.job_id);
         assert_ne!(first.owner_token, second.owner_token);
     }
+
+    #[tokio::test]
+    async fn incomplete_qdrant_state_reopens_a_terminal_vector_job() {
+        let (_temp, registry) = registry().await;
+        let RegistrationOutcome::Registered(literature) = registry
+            .register(
+                input("459", "Incomplete terminal job"),
+                None,
+                "2026-01-01T00:00:00Z",
+            )
+            .await
+            .expect("register")
+        else {
+            panic!("expected registration");
+        };
+        registry
+            .record_vector_status(
+                &literature.literature_id,
+                "collection",
+                "profile",
+                "complete",
+                None,
+                None,
+                None,
+                "2026-01-01T00:00:00Z",
+            )
+            .await
+            .expect("complete job");
+        let now = chrono::DateTime::parse_from_rfc3339("2026-01-02T00:00:00Z")
+            .expect("timestamp")
+            .with_timezone(&chrono::Utc);
+
+        assert!(
+            registry
+                .reopen_terminal_vector_job_if_incomplete(
+                    &literature.literature_id,
+                    "collection",
+                    "profile",
+                    3,
+                    1,
+                    now,
+                )
+                .await
+                .expect("reopen")
+        );
+        assert!(matches!(
+            registry
+                .claim_vector_job(&literature.literature_id, "collection", "profile", now,)
+                .await
+                .expect("claim"),
+            VectorLeaseOutcome::Acquired(_)
+        ));
+    }
 }
