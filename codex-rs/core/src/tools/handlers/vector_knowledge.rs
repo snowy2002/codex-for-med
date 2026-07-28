@@ -30,22 +30,11 @@ const MAX_TOP_K: usize = 30;
 const HTTP_TIMEOUT_SECONDS: u64 = 60;
 const QDRANT_API_KEY_HEADER: HeaderName = HeaderName::from_static("api-key");
 
-// --- Baked-in credentials for the shared codex-med gateway -------------------
-//
-// These make `codex-med` work out-of-the-box against the public deployment on
-// codex-med.opensii.ai (Caddy + Qdrant + FastAPI SQL API + Qwen3 embed/rerank).
-// Users who need to point at a different backend can override every value with
-// the environment variables that follow the `env_non_empty(...)` lookups below.
-//
-// Rotating the tokens: edit the constants here, rebuild `codex`, ship the new
-// binary. Alternatively export the matching env vars on the client host.
 const DEFAULT_EMBEDDING_URL: &str = "http://gw-bzokqkvr2cblz8ok6y.cn-wulanchabu-acdr-1.pai-eas.aliyuncs.com/api/predict/qwen3_embedding_4b/v1/embeddings";
 const DEFAULT_EMBEDDING_MODEL: &str = "/model_dir/Qwen3-Embedding-4B";
-const BAKED_EMBEDDING_API_KEY: &str = "OTE4MDhiNDE1YmIwYTEzNjE1ZTA2YjFhMTVhNmU3MzczNGVlMTkzZA==";
 
 const DEFAULT_RERANKER_URL: &str = "http://gw-bzokqkvr2cblz8ok6y.cn-wulanchabu-acdr-1.pai-eas.aliyuncs.com/api/predict/qwen3_reranker_4b/v1/rerank";
 const DEFAULT_RERANKER_MODEL: &str = "/model_dir/Qwen3-Reranker-4B";
-const BAKED_RERANKER_API_KEY: &str = "ZmJjYjEwYTI4ZTBjYzhkMTMzYjQwMjk0Zjg1MjQ4ODQ4ODBkOGMyNg==";
 
 // Recall / rerank tuning. We over-recall from Qdrant, ask the reranker to
 // re-score, then return the requested top_k. Match the docs' recommended
@@ -343,10 +332,14 @@ async fn embed_query(
         body["model"] = Value::String(model.to_string());
     }
     let mut request = client.post(embedding_url.clone()).json(&body);
-    let token = env_non_empty("CODEX_MED_EMBEDDING_API_KEY")
-        .or_else(|| env_non_empty("EMBEDDING_API_KEY"))
-        .unwrap_or_else(|| BAKED_EMBEDDING_API_KEY.to_string());
-    if !token.is_empty() {
+    let token =
+        env_non_empty("CODEX_MED_EMBEDDING_API_KEY").or_else(|| env_non_empty("EMBEDDING_API_KEY"));
+    if token.is_none() && embedding_url.as_str() == DEFAULT_EMBEDDING_URL {
+        return Err(FunctionCallError::RespondToModel(
+            "CODEX_MED_EMBEDDING_API_KEY must be set for the default embedding service".to_string(),
+        ));
+    }
+    if let Some(token) = token {
         request = request.bearer_auth(token);
     }
     let response = request.send().await.map_err(|err| {
@@ -633,9 +626,13 @@ async fn rerank(
         "documents": documents,
     });
     let mut request = client.post(reranker_url.clone()).json(&body);
-    let token = env_non_empty("CODEX_MED_RERANKER_API_KEY")
-        .unwrap_or_else(|| BAKED_RERANKER_API_KEY.to_string());
-    if !token.is_empty() {
+    let token = env_non_empty("CODEX_MED_RERANKER_API_KEY");
+    if token.is_none() && reranker_url.as_str() == DEFAULT_RERANKER_URL {
+        return Err(FunctionCallError::RespondToModel(
+            "CODEX_MED_RERANKER_API_KEY must be set for the default reranker service".to_string(),
+        ));
+    }
+    if let Some(token) = token {
         request = request.bearer_auth(token);
     }
     let response = request.send().await.map_err(|err| {

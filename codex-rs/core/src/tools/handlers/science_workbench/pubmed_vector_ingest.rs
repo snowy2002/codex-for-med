@@ -12,7 +12,6 @@ use std::collections::HashSet;
 use std::time::Duration;
 use std::time::Instant;
 
-use super::EMBEDDING_API_KEY;
 use super::EMBEDDING_MODEL;
 use super::EMBEDDING_URL;
 use super::QDRANT_COLLECTION;
@@ -88,22 +87,34 @@ impl PubmedVectorConfig {
                 .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.')),
             "invalid Qdrant collection name"
         );
+        let qdrant_url = env_non_empty("CODEX_MED_VECTOR_QDRANT_URL")
+            .unwrap_or_else(|| QDRANT_URL.into())
+            .trim_end_matches('/')
+            .to_string();
+        let qdrant_api_key = env_non_empty("CODEX_MED_VECTOR_QDRANT_API_KEY")
+            .or_else(|| env_non_empty("QDRANT_API_KEY"))
+            .unwrap_or_default();
+        let embedding_url =
+            env_non_empty("CODEX_MED_EMBEDDING_URL").unwrap_or_else(|| EMBEDDING_URL.into());
+        let embedding_api_key = env_non_empty("CODEX_MED_EMBEDDING_API_KEY")
+            .or_else(|| env_non_empty("EMBEDDING_API_KEY"))
+            .unwrap_or_default();
+        ensure!(
+            !write_enabled || qdrant_url != QDRANT_URL || !qdrant_api_key.is_empty(),
+            "CODEX_MED_VECTOR_QDRANT_API_KEY must be set for writes to the default Qdrant service"
+        );
+        ensure!(
+            !write_enabled || embedding_url != EMBEDDING_URL || !embedding_api_key.is_empty(),
+            "CODEX_MED_EMBEDDING_API_KEY must be set for writes using the default embedding service"
+        );
         Ok(Self {
-            qdrant_url: env_non_empty("CODEX_MED_VECTOR_QDRANT_URL")
-                .unwrap_or_else(|| QDRANT_URL.into())
-                .trim_end_matches('/')
-                .to_string(),
+            qdrant_url,
             collection,
-            qdrant_api_key: env_non_empty("CODEX_MED_VECTOR_QDRANT_API_KEY")
-                .or_else(|| env_non_empty("QDRANT_API_KEY"))
-                .unwrap_or_default(),
-            embedding_url: env_non_empty("CODEX_MED_EMBEDDING_URL")
-                .unwrap_or_else(|| EMBEDDING_URL.into()),
+            qdrant_api_key,
+            embedding_url,
             embedding_model: env_non_empty("CODEX_MED_EMBEDDING_MODEL")
                 .unwrap_or_else(|| EMBEDDING_MODEL.into()),
-            embedding_api_key: env_non_empty("CODEX_MED_EMBEDDING_API_KEY")
-                .or_else(|| env_non_empty("EMBEDDING_API_KEY"))
-                .unwrap_or_else(|| EMBEDDING_API_KEY.into()),
+            embedding_api_key,
             write_enabled,
         })
     }

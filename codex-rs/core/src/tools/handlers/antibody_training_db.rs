@@ -43,13 +43,7 @@ const DEFAULT_MAX_CELL_CHARS: usize = 2_000;
 const MAX_CELL_CHARS_CAP: usize = 10_000;
 const HTTP_TIMEOUT_SECONDS: u64 = 30;
 
-// --- Baked-in cloud gateway --------------------------------------------------
-//
-// These are the codex-med public deployment defaults. Override with env vars
-// on the client host to rotate tokens or point somewhere else.
 const DEFAULT_SQL_API_URL: &str = "http://150.5.166.194/sql";
-const BAKED_SQL_API_TOKEN: &str =
-    "bc62ea6d3039564fd945291fd29534e1b7e08c6cfe19d239dc28bbed69a8962c";
 
 // The Postgres-backed schema behind the gateway. Kept static so that
 // `include_schema: true` returns useful column docs even if the server is
@@ -222,8 +216,12 @@ fn resolve_sql_api_base() -> String {
     env_non_empty("CODEX_MED_SQL_API_URL").unwrap_or_else(|| DEFAULT_SQL_API_URL.to_string())
 }
 
-fn resolve_sql_api_token() -> String {
-    env_non_empty("CODEX_MED_SQL_API_TOKEN").unwrap_or_else(|| BAKED_SQL_API_TOKEN.to_string())
+fn resolve_sql_api_token() -> Result<String, FunctionCallError> {
+    env_non_empty("CODEX_MED_SQL_API_TOKEN").ok_or_else(|| {
+        FunctionCallError::RespondToModel(
+            "CODEX_MED_SQL_API_TOKEN must be set in the Codex Med runtime environment".to_string(),
+        )
+    })
 }
 
 fn env_non_empty(name: &str) -> Option<String> {
@@ -241,7 +239,7 @@ async fn query_antibody_training_records(
     let max_cell_chars = args.max_cell_chars.clamp(1, MAX_CELL_CHARS_CAP);
 
     let base = resolve_sql_api_base();
-    let token = resolve_sql_api_token();
+    let token = resolve_sql_api_token()?;
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(HTTP_TIMEOUT_SECONDS))
         .build()

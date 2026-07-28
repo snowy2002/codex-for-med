@@ -91,14 +91,12 @@ const HTTP_TIMEOUT: Duration = Duration::from_secs(60);
 const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 const SQL_API_URL: &str = "http://150.5.166.194/sql";
-const SQL_API_TOKEN: &str = "bc62ea6d3039564fd945291fd29534e1b7e08c6cfe19d239dc28bbed69a8962c";
 
 const QDRANT_URL: &str = DEFAULT_QDRANT_URL;
 const QDRANT_COLLECTION: &str = DEFAULT_QDRANT_COLLECTION;
 
 const EMBEDDING_URL: &str = "http://gw-bzokqkvr2cblz8ok6y.cn-wulanchabu-acdr-1.pai-eas.aliyuncs.com/api/predict/qwen3_embedding_4b/v1/embeddings";
 const EMBEDDING_MODEL: &str = "/model_dir/Qwen3-Embedding-4B";
-const EMBEDDING_API_KEY: &str = "OTE4MDhiNDE1YmIwYTEzNjE1ZTA2YjFhMTVhNmU3MzczNGVlMTkzZA==";
 
 #[derive(Clone, Copy)]
 enum ScienceWorkbenchToolKind {
@@ -377,6 +375,25 @@ fn default_literature_top_k() -> usize {
     12
 }
 
+fn env_non_empty(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn required_env(name: &str) -> Result<String, FunctionCallError> {
+    env_non_empty(name).ok_or_else(|| {
+        FunctionCallError::RespondToModel(format!(
+            "{name} must be set in the Codex Med runtime environment"
+        ))
+    })
+}
+
+fn sql_api_url() -> String {
+    env_non_empty("CODEX_MED_SQL_API_URL").unwrap_or_else(|| SQL_API_URL.to_string())
+}
+
 async fn list_med_knowledge_collections(
     client: &reqwest::Client,
 ) -> Result<String, FunctionCallError> {
@@ -403,7 +420,7 @@ async fn list_med_knowledge_collections(
             {
                 "kind": "sql",
                 "provider": "codex-med-sql-gateway",
-                "url": SQL_API_URL,
+                "url": sql_api_url(),
                 "table": sql.get("table").cloned().unwrap_or_else(|| json!("antibodies")),
                 "row_count": sql.get("row_count").cloned().unwrap_or(Value::Null),
                 "recommended_tool": "query_antibody_training_records",
@@ -802,10 +819,11 @@ async fn literature_map(
 }
 
 async fn sql_schema(client: &reqwest::Client) -> Result<Value, FunctionCallError> {
-    let url = format!("{SQL_API_URL}/schema");
+    let url = format!("{}/schema", sql_api_url().trim_end_matches('/'));
+    let token = required_env("CODEX_MED_SQL_API_TOKEN")?;
     let response = client
         .get(url)
-        .bearer_auth(SQL_API_TOKEN)
+        .bearer_auth(token)
         .send()
         .await
         .map_err(http_error("SQL schema request failed"))?;
@@ -884,10 +902,15 @@ async fn qdrant_count(
 }
 
 async fn embed_query(client: &reqwest::Client, query: &str) -> Result<Vec<f64>, FunctionCallError> {
+    let embedding_url =
+        env_non_empty("CODEX_MED_EMBEDDING_URL").unwrap_or_else(|| EMBEDDING_URL.to_string());
+    let embedding_model =
+        env_non_empty("CODEX_MED_EMBEDDING_MODEL").unwrap_or_else(|| EMBEDDING_MODEL.to_string());
+    let embedding_api_key = required_env("CODEX_MED_EMBEDDING_API_KEY")?;
     let response = client
-        .post(EMBEDDING_URL)
-        .bearer_auth(EMBEDDING_API_KEY)
-        .json(&json!({"model": EMBEDDING_MODEL, "input": query}))
+        .post(embedding_url)
+        .bearer_auth(embedding_api_key)
+        .json(&json!({"model": embedding_model, "input": query}))
         .send()
         .await
         .map_err(http_error("embedding request failed"))?;

@@ -2,7 +2,6 @@ use super::*;
 
 const RERANKER_URL: &str = "http://gw-bzokqkvr2cblz8ok6y.cn-wulanchabu-acdr-1.pai-eas.aliyuncs.com/api/predict/qwen3_reranker_4b/v1/rerank";
 pub(super) const RERANKER_MODEL: &str = "/model_dir/Qwen3-Reranker-4B";
-const RERANKER_API_KEY: &str = "ZmJjYjEwYTI4ZTBjYzhkMTMzYjQwMjk0Zjg1MjQ4ODQ4ODBkOGMyNg==";
 
 // Over-recall from Qdrant, rerank the pool, then keep the requested number of
 // distinct documents. Mirrors the search_vector_knowledge 50 -> 8 pipeline so
@@ -63,11 +62,16 @@ async fn rerank(
     if documents.is_empty() {
         return Ok(Vec::new());
     }
+    let reranker_url =
+        env_non_empty("CODEX_MED_RERANKER_URL").unwrap_or_else(|| RERANKER_URL.to_string());
+    let reranker_model =
+        env_non_empty("CODEX_MED_RERANKER_MODEL").unwrap_or_else(|| RERANKER_MODEL.to_string());
+    let reranker_api_key = required_env("CODEX_MED_RERANKER_API_KEY")?;
     let response = client
-        .post(RERANKER_URL)
-        .bearer_auth(RERANKER_API_KEY)
+        .post(reranker_url)
+        .bearer_auth(reranker_api_key)
         .json(&json!({
-            "model": RERANKER_MODEL,
+            "model": reranker_model,
             "query": query,
             "documents": documents,
         }))
