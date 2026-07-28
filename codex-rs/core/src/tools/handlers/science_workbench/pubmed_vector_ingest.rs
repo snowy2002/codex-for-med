@@ -133,6 +133,19 @@ impl PubmedVectorConfig {
             write_enabled,
         }
     }
+
+    #[cfg(test)]
+    fn test_with_qdrant_api_key(
+        qdrant_url: &str,
+        embedding_url: &str,
+        collection: &str,
+        qdrant_api_key: &str,
+        write_enabled: bool,
+    ) -> Self {
+        let mut config = Self::test(qdrant_url, embedding_url, collection, write_enabled);
+        config.qdrant_api_key = qdrant_api_key.to_string();
+        config
+    }
 }
 
 impl<'a> PubmedVectorIngestor<'a> {
@@ -1176,7 +1189,12 @@ mod tests {
         (temp, registry, literature)
     }
 
-    async fn sandbox_qdrant_json(request: RequestBuilder) -> Value {
+    async fn sandbox_qdrant_json(request: RequestBuilder, api_key: &str) -> Value {
+        let request = if api_key.is_empty() {
+            request
+        } else {
+            request.header("api-key", api_key)
+        };
         response_json(request, "sandbox Qdrant")
             .await
             .expect("sandbox Qdrant response")
@@ -1186,6 +1204,7 @@ mod tests {
         client: &reqwest::Client,
         qdrant_url: &str,
         collection: &str,
+        api_key: &str,
     ) {
         sandbox_qdrant_json(
             client
@@ -1196,6 +1215,7 @@ mod tests {
                         "distance": "Cosine",
                     }
                 })),
+            api_key,
         )
         .await;
     }
@@ -1204,12 +1224,16 @@ mod tests {
         client: &reqwest::Client,
         qdrant_url: &str,
         collection: &str,
+        api_key: &str,
     ) -> usize {
-        sandbox_qdrant_json(client.get(format!("{qdrant_url}/collections/{collection}")))
-            .await
-            .pointer("/result/points_count")
-            .and_then(Value::as_u64)
-            .expect("sandbox point count") as usize
+        sandbox_qdrant_json(
+            client.get(format!("{qdrant_url}/collections/{collection}")),
+            api_key,
+        )
+        .await
+        .pointer("/result/points_count")
+        .and_then(Value::as_u64)
+        .expect("sandbox point count") as usize
     }
 
     async fn seed_sandbox_point(
@@ -1218,6 +1242,7 @@ mod tests {
         collection: &str,
         point_id: &str,
         payload: Value,
+        api_key: &str,
     ) {
         sandbox_qdrant_json(
             client
@@ -1231,6 +1256,7 @@ mod tests {
                         "payload": payload,
                     }]
                 })),
+            api_key,
         )
         .await;
     }
@@ -1710,9 +1736,11 @@ mod tests {
             .expect("CODEX_MED_QDRANT_IT_URL must be set")
             .trim_end_matches('/')
             .to_string();
-        let collection = format!("codex_med_it_{}", uuid::Uuid::new_v4().simple());
+        let qdrant_api_key = std::env::var("CODEX_MED_QDRANT_IT_API_KEY").unwrap_or_default();
+        let collection = std::env::var("CODEX_MED_QDRANT_IT_COLLECTION")
+            .unwrap_or_else(|_| format!("codex_med_it_{}", uuid::Uuid::new_v4().simple()));
         let client = reqwest::Client::new();
-        create_sandbox_collection(&client, &qdrant_url, &collection).await;
+        create_sandbox_collection(&client, &qdrant_url, &collection, &qdrant_api_key).await;
 
         let embedding_server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -1724,10 +1752,11 @@ mod tests {
             .await;
 
         let (_temp, registry, literature) = registry_literature().await;
-        let disabled = PubmedVectorConfig::test(
+        let disabled = PubmedVectorConfig::test_with_qdrant_api_key(
             &qdrant_url,
             &format!("{}/embed", embedding_server.uri()),
             &collection,
+            &qdrant_api_key,
             false,
         );
         let disabled_result = PubmedVectorIngestor::new(&client, disabled)
@@ -1747,14 +1776,15 @@ mod tests {
             }
         );
         assert_eq!(
-            sandbox_point_count(&client, &qdrant_url, &collection).await,
+            sandbox_point_count(&client, &qdrant_url, &collection, &qdrant_api_key).await,
             0
         );
 
-        let enabled = PubmedVectorConfig::test(
+        let enabled = PubmedVectorConfig::test_with_qdrant_api_key(
             &qdrant_url,
             &format!("{}/embed", embedding_server.uri()),
             &collection,
+            &qdrant_api_key,
             true,
         );
         let ingestor = PubmedVectorIngestor::new(&client, enabled);
@@ -1769,7 +1799,7 @@ mod tests {
             ("complete", "already_vectorized")
         );
         assert_eq!(
-            sandbox_point_count(&client, &qdrant_url, &collection).await,
+            sandbox_point_count(&client, &qdrant_url, &collection, &qdrant_api_key).await,
             1
         );
         let first_chunk = build_pubmed_chunks(&literature)
@@ -1784,6 +1814,7 @@ mod tests {
                     "with_payload": true,
                     "with_vector": false,
                 })),
+            &qdrant_api_key,
         )
         .await;
         assert_eq!(
@@ -1810,12 +1841,14 @@ mod tests {
                 &partial_chunks[0],
                 &test_now().to_rfc3339(),
             ),
+            &qdrant_api_key,
         )
         .await;
-        let partial_config = PubmedVectorConfig::test(
+        let partial_config = PubmedVectorConfig::test_with_qdrant_api_key(
             &qdrant_url,
             &format!("{}/embed", embedding_server.uri()),
             &collection,
+            &qdrant_api_key,
             true,
         );
         let partial_result = PubmedVectorIngestor::new(&client, partial_config)
@@ -1835,7 +1868,7 @@ mod tests {
             }
         );
         assert_eq!(
-            sandbox_point_count(&client, &qdrant_url, &collection).await,
+            sandbox_point_count(&client, &qdrant_url, &collection, &qdrant_api_key).await,
             3
         );
 
@@ -1854,10 +1887,11 @@ mod tests {
             .await;
         let (_failure_temp, failure_registry, failure_literature) =
             registry_literature_for("32345678", "Failure recovery abstract.".to_string()).await;
-        let failure_config = PubmedVectorConfig::test(
+        let failure_config = PubmedVectorConfig::test_with_qdrant_api_key(
             &qdrant_url,
             &format!("{}/embed", failure_server.uri()),
             &collection,
+            &qdrant_api_key,
             true,
         );
         let failure_ingestor = PubmedVectorIngestor::new(&client, failure_config);
@@ -1874,7 +1908,7 @@ mod tests {
         );
         assert_eq!(failure_literature.literature_id, literature_id);
         assert_eq!(
-            sandbox_point_count(&client, &qdrant_url, &collection).await,
+            sandbox_point_count(&client, &qdrant_url, &collection, &qdrant_api_key).await,
             4
         );
 
@@ -1893,10 +1927,11 @@ mod tests {
             LiteratureRegistry::open(concurrency_temp.path().join("literatures.sqlite3"))
                 .await
                 .expect("second registry pool");
-        let concurrency_config = PubmedVectorConfig::test(
+        let concurrency_config = PubmedVectorConfig::test_with_qdrant_api_key(
             &qdrant_url,
             &format!("{}/embed", concurrency_server.uri()),
             &collection,
+            &qdrant_api_key,
             true,
         );
         let first_ingestor = PubmedVectorIngestor::new(&client, concurrency_config.clone());
@@ -1908,7 +1943,7 @@ mod tests {
         );
         assert!(first_concurrent.status == "complete" || second_concurrent.status == "complete");
         assert_eq!(
-            sandbox_point_count(&client, &qdrant_url, &collection).await,
+            sandbox_point_count(&client, &qdrant_url, &collection, &qdrant_api_key).await,
             5
         );
 
@@ -1926,24 +1961,31 @@ mod tests {
                 "project_id": "data-extract-new",
                 "source_uri": "https://pubmed.ncbi.nlm.nih.gov/52345678/",
             }),
+            &qdrant_api_key,
         )
         .await;
-        let local_duplicate_config = PubmedVectorConfig::test(
+        let local_duplicate_config = PubmedVectorConfig::test_with_qdrant_api_key(
             &qdrant_url,
             &format!("{}/embed", embedding_server.uri()),
             &collection,
+            &qdrant_api_key,
             true,
         );
-        let before_local_duplicate = sandbox_point_count(&client, &qdrant_url, &collection).await;
+        let before_local_duplicate =
+            sandbox_point_count(&client, &qdrant_url, &collection, &qdrant_api_key).await;
         let local_duplicate = PubmedVectorIngestor::new(&client, local_duplicate_config)
             .ingest(&local_registry, &local_literature, None, test_now())
             .await;
         assert_eq!(local_duplicate.status, "already_vectorized");
         assert_eq!(
-            sandbox_point_count(&client, &qdrant_url, &collection).await,
+            sandbox_point_count(&client, &qdrant_url, &collection, &qdrant_api_key).await,
             before_local_duplicate
         );
 
-        sandbox_qdrant_json(client.delete(format!("{qdrant_url}/collections/{collection}"))).await;
+        sandbox_qdrant_json(
+            client.delete(format!("{qdrant_url}/collections/{collection}")),
+            &qdrant_api_key,
+        )
+        .await;
     }
 }
