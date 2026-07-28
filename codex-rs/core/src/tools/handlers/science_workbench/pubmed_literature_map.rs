@@ -304,6 +304,8 @@ pub(super) async fn pubmed_literature_map(
                 record.expected_points = vector.expected_points;
                 record.verified_points = vector.verified_points;
                 record.existing_vector_dataset = vector.existing_dataset;
+                record.existing_vector_document_id = vector.existing_document_id;
+                record.vector_verification_method = vector.verification_method;
                 if vector.review_case_id.is_some() {
                     record.review_case_id = vector.review_case_id;
                 }
@@ -491,6 +493,8 @@ pub(super) async fn pubmed_literature_map(
                     "expected_points": record.expected_points,
                     "verified_points": record.verified_points,
                     "existing_dataset": record.existing_vector_dataset,
+                    "existing_document_id": record.existing_vector_document_id,
+                    "verification_method": record.vector_verification_method,
                     "error": record.vector_error,
                 }
             })
@@ -715,6 +719,8 @@ struct PubmedMapRecord {
     expected_points: usize,
     verified_points: usize,
     existing_vector_dataset: Option<String>,
+    existing_vector_document_id: Option<String>,
+    vector_verification_method: String,
     vector_error: Option<String>,
     pmid: String,
     title: String,
@@ -1020,6 +1026,8 @@ fn pubmed_map_record_from_summary(rank: usize, pmid: &str, entry: &Value) -> Pub
         expected_points: 0,
         verified_points: 0,
         existing_vector_dataset: None,
+        existing_vector_document_id: None,
+        vector_verification_method: "not_complete".to_string(),
         vector_error: None,
         pmid: pmid.to_string(),
         title: entry
@@ -1860,6 +1868,8 @@ mod tests {
             expected_points: 1,
             verified_points: 1,
             existing_vector_dataset: Some("data-extract-new".to_string()),
+            existing_vector_document_id: Some("local-full-text".to_string()),
+            vector_verification_method: "strong_identifier_document".to_string(),
             vector_error: None,
             pmid: "33301246".to_string(),
             title: "Integrated stress response, aging, and disease".to_string(),
@@ -1900,6 +1910,8 @@ mod tests {
             expected_points: 0,
             verified_points: 0,
             existing_vector_dataset: None,
+            existing_vector_document_id: None,
+            vector_verification_method: "not_complete".to_string(),
             vector_error: None,
             pmid: "33301246".to_string(),
             title: "Integrated stress response, aging, and disease".to_string(),

@@ -55,6 +55,8 @@ pub(super) struct PubmedVectorResult {
     pub(super) expected_points: usize,
     pub(super) verified_points: usize,
     pub(super) existing_dataset: Option<String>,
+    pub(super) existing_document_id: Option<String>,
+    pub(super) verification_method: String,
     pub(super) review_case_id: Option<String>,
     pub(super) error: Option<String>,
 }
@@ -69,6 +71,7 @@ pub(super) struct PubmedVectorIngestor<'a> {
 struct ExistingVector {
     dataset: Option<String>,
     document_id: Option<String>,
+    point_count: usize,
 }
 
 impl PubmedVectorConfig {
@@ -212,13 +215,7 @@ impl<'a> PubmedVectorIngestor<'a> {
                         &now.to_rfc3339(),
                     )
                     .await;
-                return result(
-                    "already_vectorized",
-                    chunks.len(),
-                    chunks.len(),
-                    existing.dataset,
-                    None,
-                );
+                return existing_result(existing, "strong_identifier_document");
             }
         }
         if !own_pubmed_document {
@@ -240,24 +237,24 @@ impl<'a> PubmedVectorIngestor<'a> {
                                         .get("project_id")
                                         .and_then(Value::as_str)
                                         .map(ToString::to_string);
+                                    let document_id =
+                                        candidate.get("document_id").and_then(Value::as_str);
+                                    let existing = self.existing_document(dataset, document_id);
                                     let _ = registry
                                         .record_vector_status(
                                             &literature.literature_id,
                                             &self.config.collection,
                                             PUBMED_EMBEDDING_PROFILE,
                                             "already_vectorized",
-                                            dataset.as_deref(),
+                                            existing.dataset.as_deref(),
                                             None,
                                             None,
                                             &now.to_rfc3339(),
                                         )
                                         .await;
-                                    return result(
-                                        "already_vectorized",
-                                        chunks.len(),
-                                        chunks.len(),
-                                        dataset,
-                                        None,
+                                    return existing_result(
+                                        existing,
+                                        "reviewed_source_document",
                                     );
                                 }
                                 Ok(_) => {}
@@ -561,24 +558,60 @@ impl<'a> PubmedVectorIngestor<'a> {
 
     async fn find_existing(&self, literature: &Literature) -> Result<Option<ExistingVector>> {
         let literature_keys = strong_identifier_keys(literature);
-        Ok(self
-            .collection_points()
-            .await?
-            .iter()
-            .find(|point| {
-                let payload = point.get("payload").unwrap_or(&Value::Null);
-                !literature_keys.is_disjoint(&payload_strong_identifier_keys(payload))
+        let mut documents =
+            std::collections::BTreeMap::<(Option<String>, Option<String>), usize>::new();
+        for point in self.collection_points().await? {
+            let payload = point.get("payload").unwrap_or(&Value::Null);
+            if literature_keys.is_disjoint(&payload_strong_identifier_keys(payload)) {
+                continue;
+            }
+            let key = (
+                payload
+                    .get("project_id")
+                    .and_then(Value::as_str)
+                    .map(ToString::to_string),
+                payload
+                    .get("document_id")
+                    .and_then(Value::as_str)
+                    .map(ToString::to_string),
+            );
+            *documents.entry(key).or_default() += 1;
+        }
+        Ok(documents
+            .into_iter()
+            .max_by(|(left_key, left_count), (right_key, right_count)| {
+                left_count
+                    .cmp(right_count)
+                    .then_with(|| right_key.cmp(left_key))
             })
-            .map(|point| ExistingVector {
-                dataset: point
-                    .pointer("/payload/project_id")
-                    .and_then(Value::as_str)
-                    .map(ToString::to_string),
-                document_id: point
-                    .pointer("/payload/document_id")
-                    .and_then(Value::as_str)
-                    .map(ToString::to_string),
+            .map(|((dataset, document_id), point_count)| ExistingVector {
+                dataset,
+                document_id,
+                point_count,
             }))
+    }
+
+    fn existing_document(
+        &self,
+        dataset: Option<String>,
+        document_id: Option<&str>,
+    ) -> ExistingVector {
+        let point_count = self
+            .collection_points
+            .get()
+            .into_iter()
+            .flatten()
+            .filter(|point| {
+                let payload = point.get("payload").unwrap_or(&Value::Null);
+                payload.get("project_id").and_then(Value::as_str) == dataset.as_deref()
+                    && payload.get("document_id").and_then(Value::as_str) == document_id
+            })
+            .count();
+        ExistingVector {
+            dataset,
+            document_id: document_id.map(ToString::to_string),
+            point_count,
+        }
     }
 
     async fn find_possible_duplicates(&self, literature: &Literature) -> Result<Vec<Value>> {
@@ -1013,8 +1046,27 @@ fn result(
         expected_points,
         verified_points,
         existing_dataset,
+        existing_document_id: None,
+        verification_method: if matches!(status, "complete" | "already_vectorized") {
+            "deterministic_point_ids".to_string()
+        } else {
+            "not_complete".to_string()
+        },
         review_case_id: None,
         error,
+    }
+}
+
+fn existing_result(existing: ExistingVector, verification_method: &str) -> PubmedVectorResult {
+    PubmedVectorResult {
+        status: "already_vectorized".to_string(),
+        expected_points: existing.point_count,
+        verified_points: existing.point_count,
+        existing_dataset: existing.dataset,
+        existing_document_id: existing.document_id,
+        verification_method: verification_method.to_string(),
+        review_case_id: None,
+        error: None,
     }
 }
 
@@ -1233,14 +1285,24 @@ mod tests {
         Mock::given(method("POST"))
             .and(path("/collections/temporary/points/scroll"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "result": {"points": [{
-                    "id": "local-point",
-                    "payload": {
-                        "project_id": "data-extract-new",
-                        "document_id": "local-full-text",
-                        "paper_id": "PMID:12345678"
+                "result": {"points": [
+                    {
+                        "id": "local-point-1",
+                        "payload": {
+                            "project_id": "data-extract-new",
+                            "document_id": "local-full-text",
+                            "paper_id": "PMID:12345678"
+                        }
+                    },
+                    {
+                        "id": "local-point-2",
+                        "payload": {
+                            "project_id": "data-extract-new",
+                            "document_id": "local-full-text",
+                            "paper_id": "PMID:12345678"
+                        }
                     }
-                }]}
+                ]}
             })))
             .expect(1)
             .mount(&server)
@@ -1259,6 +1321,10 @@ mod tests {
 
         assert_eq!(result.status, "already_vectorized");
         assert_eq!(result.existing_dataset.as_deref(), Some("data-extract-new"));
+        assert_eq!(result.existing_document_id.as_deref(), Some("local-full-text"));
+        assert_eq!(result.expected_points, 2);
+        assert_eq!(result.verified_points, 2);
+        assert_eq!(result.verification_method, "strong_identifier_document");
     }
 
     #[tokio::test]
@@ -1646,6 +1712,8 @@ mod tests {
                 expected_points: 1,
                 verified_points: 0,
                 existing_dataset: None,
+                existing_document_id: None,
+                verification_method: "not_complete".to_string(),
                 review_case_id: None,
                 error: None,
             }
@@ -1732,6 +1800,8 @@ mod tests {
                 expected_points: 2,
                 verified_points: 2,
                 existing_dataset: None,
+                existing_document_id: None,
+                verification_method: "deterministic_point_ids".to_string(),
                 review_case_id: None,
                 error: None,
             }
