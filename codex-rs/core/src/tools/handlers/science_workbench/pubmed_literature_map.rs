@@ -1,3 +1,4 @@
+use super::pubmed_cache::PubmedCache;
 use super::*;
 use crate::tools::handlers::biomed_external_db::CitationToCheck;
 use crate::tools::handlers::biomed_external_db::validate_one_citation;
@@ -27,6 +28,8 @@ pub(super) struct PubmedLiteratureMapArgs {
     max_mesh_terms: usize,
     #[serde(default)]
     validate_citations: bool,
+    #[serde(default)]
+    force_refresh: bool,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
@@ -68,6 +71,7 @@ pub(super) async fn pubmed_literature_map(
             "topic must not be empty".to_string(),
         ));
     }
+    let started_at = chrono::Utc::now();
     let pubmed_query = args
         .pubmed_query
         .as_deref()
@@ -83,18 +87,38 @@ pub(super) async fn pubmed_literature_map(
     let retmax = args.retmax.clamp(1, 50);
     let max_mesh_terms = args.max_mesh_terms.min(200);
     let year_window = pubmed_map_year_range(args.min_year, args.max_year)?;
+    let ncbi_client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(60))
+        .build()
+        .map_err(|error| {
+            FunctionCallError::Fatal(format!("failed to build the PubMed HTTP client: {error}"))
+        })?;
 
-    let mut search =
-        pubmed_map_search(client, pubmed_query, retmax, args.sort, year_window).await?;
+    let cache = PubmedCache::new(cwd, args.force_refresh);
+    let mut ncbi_stats = NcbiRequestStats::default();
+    let mut search = pubmed_map_search(
+        &ncbi_client,
+        &cache,
+        &mut ncbi_stats,
+        pubmed_query,
+        retmax,
+        args.sort,
+        year_window,
+    )
+    .await?;
 
     let mut fetch_errors = 0usize;
     if args.fetch_abstracts {
-        let delay = ncbi_fetch_delay();
         for idx in 0..search.records.len() {
-            if idx > 0 {
-                tokio::time::sleep(delay).await;
-            }
-            match fetch_pubmed_map_details(client, &search.records[idx].pmid, max_mesh_terms).await
+            match fetch_pubmed_map_details(
+                &ncbi_client,
+                &cache,
+                &mut ncbi_stats,
+                &search.records[idx].pmid,
+                max_mesh_terms,
+            )
+            .await
             {
                 Ok(details) => search.records[idx].merge_details(details),
                 Err(err) => {
@@ -110,31 +134,349 @@ pub(super) async fn pubmed_literature_map(
         PubmedCitationValidationSummary::disabled()
     };
 
-    let project_dir = cwd.join("research_projects").join(&project_id);
-    let literature_dir = project_dir.join("literature");
-    let code_dir = project_dir.join("code");
-    let provenance_dir = project_dir.join("provenance");
-    let figures_dir = project_dir.join("figures");
-    let analysis_dir = project_dir.join("analysis");
-    fs::create_dir_all(&literature_dir).map_err(fs_error("create literature directory"))?;
-    fs::create_dir_all(&code_dir).map_err(fs_error("create code directory"))?;
-    fs::create_dir_all(&provenance_dir).map_err(fs_error("create provenance directory"))?;
-    fs::create_dir_all(&figures_dir).map_err(fs_error("create figures directory"))?;
-    fs::create_dir_all(&analysis_dir).map_err(fs_error("create analysis directory"))?;
-
-    let records_csv = render_pubmed_records_csv(&search.records);
-    let records_jsonl = render_pubmed_records_jsonl(&search.records)?;
-    let report = render_pubmed_report(topic, pubmed_query, &search, &citation_validation);
-    let citations = render_pubmed_citations_bib(&search.records);
-
     let now = chrono::Utc::now();
     let now_rfc3339 = now.to_rfc3339();
-    let run_id = format!("{}_pubmed_literature_map", now.format("%Y-%m-%dT%H%M%SZ"));
+    let run_id = new_run_id(&started_at, "pubmed_literature_map");
+    let registry = LiteratureRegistry::open_workspace(cwd)
+        .await
+        .map_err(|err| {
+            FunctionCallError::Fatal(format!("failed to open literature registry: {err:#}"))
+        })?;
+    let mut registration_conflicts = Vec::new();
+    for record in &mut search.records {
+        let registration = registry
+            .register(
+                LiteratureInput {
+                    pmid: Some(record.pmid.clone()),
+                    doi: Some(record.doi.clone()),
+                    paper_id: Some(format!("PMID:{}", record.pmid)),
+                    title: Some(record.title.clone()),
+                    abstract_text: Some(record.abstract_text.clone()),
+                    authors: record.authors.clone(),
+                    journal: Some(record.journal.clone()),
+                    publication_date: Some(record.publication_date.clone()),
+                    metadata: json!({
+                        "raw_identifiers": {
+                            "pmid": record.pmid,
+                            "doi": record.doi,
+                        },
+                        "field_sources": {
+                            "title": {
+                                "source": "pubmed",
+                                "observed_at": now_rfc3339,
+                            },
+                            "abstract": {
+                                "source": "pubmed",
+                                "observed_at": now_rfc3339,
+                            },
+                            "authors": {
+                                "source": "pubmed",
+                                "observed_at": now_rfc3339,
+                            },
+                            "journal": {
+                                "source": "pubmed",
+                                "observed_at": now_rfc3339,
+                            },
+                            "publication_date": {
+                                "source": "pubmed",
+                                "observed_at": now_rfc3339,
+                            },
+                            "mesh_terms": {
+                                "source": "pubmed",
+                                "observed_at": now_rfc3339,
+                            },
+                            "publication_types": {
+                                "source": "pubmed",
+                                "observed_at": now_rfc3339,
+                            },
+                            "language": {
+                                "source": "pubmed",
+                                "observed_at": now_rfc3339,
+                            },
+                            "relations": {
+                                "source": "pubmed",
+                                "observed_at": now_rfc3339,
+                            }
+                        },
+                        "mesh_terms": record.mesh_terms,
+                        "publication_types": record.publication_types,
+                        "language": record.language,
+                        "relations": record.relations,
+                        "publication_date_precision": publication_date_precision(&record.publication_date),
+                        "flags": {
+                            "abstract_missing": record.abstract_text.trim().is_empty(),
+                            "retracted": has_publication_type(&record.publication_types, "retracted"),
+                            "corrected": has_publication_type(&record.publication_types, "erratum")
+                                || has_publication_type(&record.publication_types, "corrected"),
+                        }
+                    }),
+                },
+                Some(SourceRecord {
+                    system: "pubmed".to_string(),
+                    key: record.pmid.clone(),
+                    match_method: "pmid".to_string(),
+                }),
+                &now_rfc3339,
+            )
+            .await
+            .map_err(|err| {
+                FunctionCallError::Fatal(format!(
+                    "failed to register PubMed literature metadata: {err:#}"
+                ))
+            })?;
+        match registration {
+            RegistrationOutcome::Registered(registered) => {
+                record.literature_id = registered.literature_id;
+                record.review_case_id = registered.review_case_id;
+                record.match_method = registered.match_method;
+            }
+            RegistrationOutcome::Conflict {
+                review_case_id,
+                matched_literature_ids,
+            } => {
+                record.review_case_id = Some(review_case_id.clone());
+                record.match_method = "identifier_conflict".to_string();
+                registration_conflicts.push(json!({
+                    "review_case_id": review_case_id,
+                    "matched_literature_ids": matched_literature_ids,
+                    "pmid": record.pmid,
+                    "doi": record.doi,
+                }));
+            }
+        }
+    }
 
-    let run = json!({
+    let mut vector_collection = None;
+    let mut vector_embedding_model = None;
+    let mut vector_writes_enabled = false;
+    let mut vector_registry_backup = None;
+    match PubmedVectorConfig::from_environment() {
+        Ok(config) => {
+            vector_collection = Some(config.collection_name().to_string());
+            vector_embedding_model = Some(config.embedding_model().to_string());
+            vector_writes_enabled = config.write_enabled();
+            if vector_writes_enabled {
+                let backup = cwd
+                    .join(".codex-med")
+                    .join("backups")
+                    .join(format!("literatures_before_{run_id}.sqlite3"));
+                registry.backup_to(&backup).await.map_err(|err| {
+                    FunctionCallError::Fatal(format!(
+                        "refusing vector writes because the registry backup failed: {err:#}"
+                    ))
+                })?;
+                vector_registry_backup = Some(relative_display(cwd, &backup));
+            }
+            let ingestor = PubmedVectorIngestor::new(client, config);
+            for record in &mut search.records {
+                if record.literature_id.is_empty() {
+                    record.vector_status = "blocked_conflict".to_string();
+                    continue;
+                }
+                let literature = match registry.get(&record.literature_id).await {
+                    Ok(Some(literature)) => literature,
+                    Ok(None) => {
+                        record.vector_status = "failed".to_string();
+                        record.vector_error =
+                            Some("registered literature metadata is missing".to_string());
+                        continue;
+                    }
+                    Err(err) => {
+                        record.vector_status = "failed".to_string();
+                        record.vector_error = Some(format!(
+                            "failed to read registered literature metadata: {err:#}"
+                        ));
+                        continue;
+                    }
+                };
+                let vector = ingestor
+                    .ingest(
+                        &registry,
+                        &literature,
+                        record.review_case_id.as_deref(),
+                        now,
+                    )
+                    .await;
+                record.apply_global_metadata(&literature);
+                record.vector_status = vector.status;
+                record.expected_points = vector.expected_points;
+                record.verified_points = vector.verified_points;
+                record.existing_vector_dataset = vector.existing_dataset;
+                if vector.review_case_id.is_some() {
+                    record.review_case_id = vector.review_case_id;
+                }
+                record.vector_error = vector.error;
+            }
+        }
+        Err(err) => {
+            for record in &mut search.records {
+                record.vector_status = "failed".to_string();
+                record.vector_error = Some(format!("invalid PubMed vector configuration: {err:#}"));
+            }
+        }
+    }
+    for record in &mut search.records {
+        if record.literature_id.is_empty() {
+            continue;
+        }
+        match registry.get(&record.literature_id).await {
+            Ok(Some(literature)) => record.apply_global_metadata(&literature),
+            Ok(None) => {
+                record.vector_status = "failed".to_string();
+                record.vector_error = Some("registered literature metadata is missing".to_string());
+            }
+            Err(error) => {
+                record.vector_status = "failed".to_string();
+                record.vector_error = Some(format!("failed to resolve global metadata: {error:#}"));
+            }
+        }
+    }
+
+    let mut seen_literature_ids = std::collections::HashSet::new();
+    let literature_ids = search
+        .records
+        .iter()
+        .filter(|record| !record.literature_id.is_empty())
+        .filter(|&record| seen_literature_ids.insert(record.literature_id.clone()))
+        .map(|record| record.literature_id.clone())
+        .collect::<Vec<_>>();
+    let ids_csv = render_literature_ids(&literature_ids);
+    let report = render_pubmed_report(
+        topic,
+        pubmed_query,
+        &search,
+        &citation_validation,
+        &ncbi_stats,
+    );
+    let citations = render_pubmed_citations_bib(&search.records);
+    let project_dir = cwd.join("research_projects").join(&project_id);
+    let vector_statuses = search.records.iter().fold(
+        std::collections::BTreeMap::<String, usize>::new(),
+        |mut counts, record| {
+            *counts.entry(record.vector_status.clone()).or_default() += 1;
+            counts
+        },
+    );
+    let mut run_errors = registration_conflicts
+        .iter()
+        .map(|conflict| {
+            json!({
+                "stage": "sqlite_registration",
+                "retryable": false,
+                "recovery": "Resolve the review_case_id before rerunning the affected record.",
+                "details": conflict,
+            })
+        })
+        .collect::<Vec<_>>();
+    for record in &search.records {
+        if let Some(error) = record.fetch_error.as_deref() {
+            run_errors.push(json!({
+                "stage": "pubmed_efetch",
+                "record": {"pmid": record.pmid},
+                "retryable": true,
+                "recovery": "Rerun with force_refresh=true after NCBI recovers.",
+                "message": error,
+            }));
+        }
+        if let Some(error) = record.vector_error.as_deref() {
+            run_errors.push(json!({
+                "stage": "vector_ingestion",
+                "record": {
+                    "literature_id": record.literature_id,
+                    "pmid": record.pmid,
+                },
+                "retryable": record.vector_status == "failed",
+                "recovery": "Inspect the vector job and review case before retrying.",
+                "message": error,
+            }));
+        }
+        if let Some(validation) = record.citation_validation.as_ref().filter(|validation| {
+            validation.status != "verified" && !validation.warning.trim().is_empty()
+        }) {
+            run_errors.push(json!({
+                "stage": "citation_validation",
+                "record": {
+                    "literature_id": record.literature_id,
+                    "pmid": record.pmid,
+                    "doi": record.doi,
+                },
+                "retryable": validation.status == "validation_error",
+                "recovery": "Review the resolved citation metadata before manuscript use.",
+                "message": validation.warning,
+            }));
+        }
+    }
+    for degradation in &search.query_degraded {
+        run_errors.push(json!({
+            "stage": "pubmed_query_translation",
+            "retryable": false,
+            "recovery": "Review the translated PubMed query and refine pubmed_query if needed.",
+            "message": degradation,
+        }));
+    }
+    let finished_at = chrono::Utc::now().to_rfc3339();
+    let run_status = if run_errors.is_empty() {
+        "completed"
+    } else {
+        "completed_with_errors"
+    };
+    let provenance_hits = search
+        .records
+        .iter()
+        .map(|record| {
+            let citation_validation = record.citation_validation.as_ref().map(|validation| {
+                json!({
+                    "status": validation.status,
+                    "warning": validation.warning,
+                    "title_match": validation.title_match,
+                    "authors_match": validation.authors_match,
+                    "year_match": validation.year_match,
+                    "resolved_title": validation.resolved_title,
+                    "resolved_year": validation.resolved_year,
+                })
+            });
+            json!({
+                "rank": record.rank,
+                "literature_id": record.literature_id,
+                "pmid": record.pmid,
+                "doi": record.doi,
+                "source_uri": format!("https://pubmed.ncbi.nlm.nih.gov/{}/", record.pmid),
+                "external_identifiers": {
+                    "pmid": record.pmid,
+                    "doi": record.doi,
+                    "paper_id": format!("PMID:{}", record.pmid),
+                },
+                "retrieval_score": Value::Null,
+                "match_method": record.match_method,
+                "duplicate_status": if record.literature_id.is_empty() {
+                    "identifier_conflict"
+                } else if record.review_case_id.is_some() {
+                    "possible_duplicate"
+                } else {
+                    "canonical"
+                },
+                "review_case_id": record.review_case_id,
+                "vector_job_status": record.vector_status,
+                "fetch_error": record.fetch_error,
+                "citation_validation": citation_validation,
+                "vector": {
+                    "status": record.vector_status,
+                    "expected_points": record.expected_points,
+                    "verified_points": record.verified_points,
+                    "existing_dataset": record.existing_vector_dataset,
+                    "error": record.vector_error,
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let mut run = json!({
+        "schema_version": 1,
         "workflow": "pubmed_literature_map",
         "run_id": run_id,
-        "run_at": now_rfc3339,
+        "started_at": started_at.to_rfc3339(),
+        "finished_at": finished_at,
+        "status": run_status,
         "project_id": project_id,
         "topic": topic,
         "pubmed_query": pubmed_query,
@@ -144,58 +486,112 @@ pub(super) async fn pubmed_literature_map(
         "fetch_abstracts": args.fetch_abstracts,
         "max_mesh_terms": max_mesh_terms,
         "validate_citations": args.validate_citations,
+        "force_refresh": args.force_refresh,
+        "input": {
+            "original": {
+                "topic": args.topic,
+                "pubmed_query": args.pubmed_query,
+                "project_id": args.project_id,
+                "retmax": args.retmax,
+                "sort": args.sort.as_esearch_sort(),
+                "min_year": args.min_year,
+                "max_year": args.max_year,
+                "fetch_abstracts": args.fetch_abstracts,
+                "max_mesh_terms": args.max_mesh_terms,
+                "validate_citations": args.validate_citations,
+                "force_refresh": args.force_refresh,
+            },
+            "normalized": {
+                "topic": topic,
+                "pubmed_query": pubmed_query,
+                "project_id": project_id,
+                "retmax": retmax,
+                "sort": args.sort.as_esearch_sort(),
+                "year_range": pubmed_map_year_range_json(args.min_year, args.max_year),
+                "fetch_abstracts": args.fetch_abstracts,
+                "max_mesh_terms": max_mesh_terms,
+                "validate_citations": args.validate_citations,
+                "force_refresh": args.force_refresh,
+            },
+        },
+        "cache": relative_display(cwd, &cwd.join(".codex-med").join("cache").join("pubmed")),
+        "vector_ingestion": {
+            "collection": vector_collection,
+            "embedding_model": vector_embedding_model,
+            "embedding_profile": super::pubmed_chunks::PUBMED_EMBEDDING_PROFILE,
+            "writes_enabled": vector_writes_enabled,
+            "registry_backup": vector_registry_backup,
+        },
         "backends": {
             "pubmed": {
                 "provider": "NCBI E-utilities",
                 "esearch_url": NCBI_ESEARCH_URL,
                 "esummary_url": NCBI_ESUMMARY_URL,
                 "efetch_url": NCBI_EFETCH_URL
+            },
+            "vector": {
+                "provider": "qdrant",
+                "collection": vector_collection,
+                "embedding_model": vector_embedding_model,
+                "embedding_profile": super::pubmed_chunks::PUBMED_EMBEDDING_PROFILE,
+                "reranker_model": Value::Null,
             }
         },
         "query_translation": search.query_translation,
         "query_degraded": search.query_degraded,
+        "ncbi_requests": ncbi_stats.to_json(),
         "total_count": search.total_count,
         "returned": search.records.len(),
         "dropped_by_esummary": search.dropped_by_esummary,
         "fetch_errors": fetch_errors,
         "citation_validation": citation_validation.to_json(),
-        "outputs": {
-            "pubmed_records_csv": relative_display(&project_dir, &literature_dir.join("pubmed_records.csv")),
-            "pubmed_records_jsonl": relative_display(&project_dir, &literature_dir.join("pubmed_records.jsonl")),
-            "report": relative_display(&project_dir, &literature_dir.join("report.md")),
-            "citations": relative_display(&project_dir, &literature_dir.join("citations.bib"))
+        "registry": relative_display(cwd, registry.path()),
+        "registration_conflicts": registration_conflicts,
+        "errors": run_errors,
+        "hits": provenance_hits,
+        "counts": {
+            "pubmed_records": search.records.len(),
+            "output_literatures": literature_ids.len(),
+            "registration_conflicts": registration_conflicts.len(),
+            "fetch_errors": fetch_errors,
+            "vector_statuses": vector_statuses,
         }
     });
 
-    write_file(&literature_dir.join("pubmed_records.csv"), &records_csv)?;
-    write_file(&literature_dir.join("pubmed_records.jsonl"), &records_jsonl)?;
-    write_file(&literature_dir.join("report.md"), &report)?;
-    write_file(&literature_dir.join("citations.bib"), &citations)?;
-    write_file(
-        &provenance_dir.join("run.json"),
-        &serde_json::to_string_pretty(&run).map_err(json_error("serialize run provenance"))?,
-    )?;
-
-    let manifest_path = record_project_run(
-        &project_dir,
-        &project_id,
-        topic,
-        &now_rfc3339,
-        run,
-        &provenance_dir.join("run.json"),
-        &[
-            (
-                "pubmed_records_csv",
-                literature_dir.join("pubmed_records.csv").as_path(),
-            ),
-            (
-                "pubmed_records_jsonl",
-                literature_dir.join("pubmed_records.jsonl").as_path(),
-            ),
-            ("report", literature_dir.join("report.md").as_path()),
-            ("citations", literature_dir.join("citations.bib").as_path()),
-        ],
-    )?;
+    let (committed, manifest_path) = with_project_lock(&project_dir, || {
+        let legacy_migration = migrate_legacy_project(&project_dir)?;
+        let recovered_runs = recover_incomplete_literature_runs(&project_dir)?;
+        if let Some(object) = run.as_object_mut() {
+            object.insert("legacy_migration".to_string(), json!(legacy_migration));
+            object.insert("recovered_runs".to_string(), json!(recovered_runs));
+        }
+        let committed = commit_literature_run(
+            cwd,
+            &project_id,
+            "pubmed",
+            "pubmed_literature_map",
+            &run_id,
+            &ids_csv,
+            &report,
+            &citations,
+            run.clone(),
+        )?;
+        let manifest_path = record_project_run_unlocked(
+            &committed.project_dir,
+            &project_id,
+            topic,
+            &finished_at,
+            run.clone(),
+            "pubmed",
+            &committed.provenance,
+            &[
+                ("literature_ids", &committed.latest_ids),
+                ("report", &committed.latest_report),
+                ("citations", &committed.latest_citations),
+            ],
+        )?;
+        Ok((committed, manifest_path))
+    })?;
 
     let output = json!({
         "project_id": project_id,
@@ -206,28 +602,23 @@ pub(super) async fn pubmed_literature_map(
         "total_count": search.total_count,
         "fetch_abstracts": args.fetch_abstracts,
         "fetch_errors": fetch_errors,
+        "vector_writes_enabled": vector_writes_enabled,
+        "vector_statuses": vector_statuses,
         "validate_citations": args.validate_citations,
         "citation_validation": citation_validation.to_json(),
         "manifest": manifest_path,
         "created_files": [
-            literature_dir.join("pubmed_records.csv"),
-            literature_dir.join("pubmed_records.jsonl"),
-            literature_dir.join("report.md"),
-            literature_dir.join("citations.bib"),
-            provenance_dir.join("run.json"),
+            committed.latest_ids,
+            committed.latest_report,
+            committed.latest_citations,
+            committed.provenance,
+            committed.snapshot_dir,
             manifest_path
         ],
-        "created_directories": [
-            literature_dir,
-            code_dir,
-            analysis_dir,
-            figures_dir,
-            provenance_dir
-        ],
         "next_steps": [
-            "Review literature/pubmed_records.csv for relevance and missing abstracts.",
-            "Check query_translation and query_degraded in provenance/run.json before trusting PubMed filters.",
-            "Review citation_status and citation_warning columns before manuscript use."
+            "Review literature/pubmed/literature_ids.csv and report.md.",
+            "Check this run's provenance before trusting PubMed filters.",
+            "Resolve any review_case_id before vectorizing a possible duplicate."
         ]
     });
     pretty_json(output)
@@ -242,9 +633,42 @@ struct PubmedMapSearchResult {
     records: Vec<PubmedMapRecord>,
 }
 
+#[derive(Debug, Default)]
+struct NcbiRequestStats {
+    logical_requests: usize,
+    cache_hits: usize,
+    network_attempts: usize,
+    retries: usize,
+    throttled_responses: usize,
+    server_error_responses: usize,
+    transient_network_errors: usize,
+}
+
+impl NcbiRequestStats {
+    fn to_json(&self) -> Value {
+        json!({
+            "logical_requests": self.logical_requests,
+            "cache_hits": self.cache_hits,
+            "network_attempts": self.network_attempts,
+            "retries": self.retries,
+            "throttled_responses": self.throttled_responses,
+            "server_error_responses": self.server_error_responses,
+            "transient_network_errors": self.transient_network_errors,
+        })
+    }
+}
+
 #[derive(Debug, Clone)]
 struct PubmedMapRecord {
     rank: usize,
+    literature_id: String,
+    review_case_id: Option<String>,
+    match_method: String,
+    vector_status: String,
+    expected_points: usize,
+    verified_points: usize,
+    existing_vector_dataset: Option<String>,
+    vector_error: Option<String>,
     pmid: String,
     title: String,
     authors: Vec<String>,
@@ -256,6 +680,7 @@ struct PubmedMapRecord {
     mesh_terms: Vec<String>,
     mesh_term_count: usize,
     language: String,
+    relations: Vec<Value>,
     fetch_error: Option<String>,
     citation_validation: Option<PubmedCitationValidation>,
 }
@@ -277,7 +702,35 @@ impl PubmedMapRecord {
         if !details.mesh_terms.is_empty() {
             self.mesh_terms = details.mesh_terms;
         }
+        if !details.relations.is_empty() {
+            self.relations = details.relations;
+        }
         self.mesh_term_count = details.mesh_term_count;
+    }
+
+    fn apply_global_metadata(&mut self, literature: &literature_registry::Literature) {
+        self.pmid = literature.pmid.clone().unwrap_or_default();
+        self.doi = literature.doi.clone().unwrap_or_default();
+        self.title = literature.title.clone().unwrap_or_default();
+        self.authors = literature.authors.clone();
+        self.journal = literature.journal.clone().unwrap_or_default();
+        self.publication_date = literature.publication_date.clone().unwrap_or_default();
+        self.abstract_text = literature.abstract_text.clone().unwrap_or_default();
+        self.mesh_terms = metadata_string_array(&literature.metadata, "mesh_terms");
+        self.mesh_term_count = self.mesh_terms.len();
+        self.publication_types = metadata_string_array(&literature.metadata, "publication_types");
+        self.language = literature
+            .metadata
+            .get("language")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        self.relations = literature
+            .metadata
+            .get("relations")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
     }
 }
 
@@ -333,10 +786,13 @@ struct PubmedMapDetails {
     mesh_terms: Vec<String>,
     mesh_term_count: usize,
     language: String,
+    relations: Vec<Value>,
 }
 
 async fn pubmed_map_search(
     client: &reqwest::Client,
+    cache: &PubmedCache,
+    stats: &mut NcbiRequestStats,
     query: &str,
     retmax: usize,
     sort: PubmedMapSort,
@@ -354,9 +810,15 @@ async fn pubmed_map_search(
         esearch_query.push(("maxdate", max_year.to_string()));
     }
 
-    let esearch_json =
-        http_get_json_with_query(client, NCBI_ESEARCH_URL, &esearch_query, "PubMed esearch")
-            .await?;
+    let esearch_json = http_get_json_with_query(
+        client,
+        cache,
+        stats,
+        NCBI_ESEARCH_URL,
+        &esearch_query,
+        "PubMed esearch",
+    )
+    .await?;
     if let Some(error) = esearch_json
         .pointer("/esearchresult/ERROR")
         .and_then(Value::as_str)
@@ -402,6 +864,8 @@ async fn pubmed_map_search(
     esummary_query.push(("retmode", "json".to_string()));
     let esummary_json = http_get_json_with_query(
         client,
+        cache,
+        stats,
         NCBI_ESUMMARY_URL,
         &esummary_query,
         "PubMed esummary",
@@ -431,6 +895,8 @@ async fn pubmed_map_search(
 
 async fn fetch_pubmed_map_details(
     client: &reqwest::Client,
+    cache: &PubmedCache,
+    stats: &mut NcbiRequestStats,
     pmid: &str,
     max_mesh_terms: usize,
 ) -> Result<PubmedMapDetails, FunctionCallError> {
@@ -440,7 +906,7 @@ async fn fetch_pubmed_map_details(
     query.push(("rettype", "medline".to_string()));
     query.push(("retmode", "text".to_string()));
 
-    let raw_text = http_get_text_with_query(client, NCBI_EFETCH_URL, &query).await?;
+    let raw_text = http_get_text_with_query(client, cache, stats, NCBI_EFETCH_URL, &query).await?;
     if looks_like_ncbi_empty_response(&raw_text) {
         return Err(FunctionCallError::RespondToModel(format!(
             "NCBI returned no PubMed record for {pmid}: {}",
@@ -472,6 +938,7 @@ async fn fetch_pubmed_map_details(
         mesh_terms,
         mesh_term_count,
         language: medline_first(&fields, "LA").unwrap_or_default(),
+        relations: medline_relations(&fields),
     })
 }
 
@@ -499,6 +966,14 @@ fn pubmed_map_record_from_summary(rank: usize, pmid: &str, entry: &Value) -> Pub
 
     PubmedMapRecord {
         rank,
+        literature_id: String::new(),
+        review_case_id: None,
+        match_method: "not_registered".to_string(),
+        vector_status: "not_processed".to_string(),
+        expected_points: 0,
+        verified_points: 0,
+        existing_vector_dataset: None,
+        vector_error: None,
         pmid: pmid.to_string(),
         title: entry
             .get("title")
@@ -522,6 +997,7 @@ fn pubmed_map_record_from_summary(rank: usize, pmid: &str, entry: &Value) -> Pub
         mesh_terms: Vec::new(),
         mesh_term_count: 0,
         language: String::new(),
+        relations: Vec::new(),
         fetch_error: None,
         citation_validation: None,
     }
@@ -531,6 +1007,36 @@ fn replace_non_empty(target: &mut String, value: String) {
     if !value.trim().is_empty() {
         *target = value;
     }
+}
+
+fn metadata_string_array(metadata: &Value, key: &str) -> Vec<String> {
+    metadata
+        .get(key)
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(ToString::to_string)
+        .collect()
+}
+
+fn publication_date_precision(value: &str) -> &'static str {
+    let parts = value
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .filter(|part| !part.is_empty())
+        .count();
+    match parts {
+        0 => "unknown",
+        1 => "year",
+        2 => "month",
+        _ => "day",
+    }
+}
+
+fn has_publication_type(publication_types: &[String], needle: &str) -> bool {
+    publication_types
+        .iter()
+        .any(|publication_type| publication_type.to_ascii_lowercase().contains(needle))
 }
 
 async fn validate_pubmed_map_citations(
@@ -684,6 +1190,112 @@ fn ncbi_fetch_delay() -> Duration {
     }
 }
 
+fn ncbi_retry_backoff(attempt: usize) -> Duration {
+    let exponential = 500 * (1_u64 << attempt.min(4));
+    let jitter = u64::from(uuid::Uuid::new_v4().as_bytes()[0]);
+    Duration::from_millis(exponential + jitter)
+}
+
+fn ncbi_retry_after_delay(value: &str, now: chrono::DateTime<chrono::Utc>) -> Option<Duration> {
+    if let Ok(seconds) = value.trim().parse::<u64>() {
+        return Some(Duration::from_secs(seconds));
+    }
+    let retry_at = chrono::DateTime::parse_from_rfc2822(value.trim())
+        .ok()?
+        .with_timezone(&chrono::Utc);
+    Some(
+        retry_at
+            .signed_duration_since(now)
+            .to_std()
+            .unwrap_or(Duration::ZERO),
+    )
+}
+
+static NCBI_REQUEST_GATE: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+static NCBI_LAST_REQUEST: std::sync::Mutex<Option<tokio::time::Instant>> =
+    std::sync::Mutex::new(None);
+
+async fn wait_for_ncbi_request_slot() -> Result<(), FunctionCallError> {
+    let _permit = NCBI_REQUEST_GATE
+        .acquire()
+        .await
+        .map_err(|_| FunctionCallError::Fatal("NCBI request gate was closed".to_string()))?;
+    let last_request = {
+        *NCBI_LAST_REQUEST
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    };
+    if let Some(last_request) = last_request {
+        tokio::time::sleep_until(last_request + ncbi_fetch_delay()).await;
+    }
+    *NCBI_LAST_REQUEST
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(tokio::time::Instant::now());
+    Ok(())
+}
+
+async fn ncbi_get_with_retry(
+    client: &reqwest::Client,
+    url: &str,
+    query: &[(&str, String)],
+    stats: &mut NcbiRequestStats,
+) -> Result<reqwest::Response, FunctionCallError> {
+    const MAX_RETRIES: usize = 5;
+    for attempt in 0..=MAX_RETRIES {
+        wait_for_ncbi_request_slot().await?;
+        stats.network_attempts += 1;
+        match client
+            .get(url)
+            .query(query)
+            .timeout(Duration::from_secs(60))
+            .send()
+            .await
+        {
+            Ok(response)
+                if (response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS
+                    || response.status().is_server_error())
+                    && attempt < MAX_RETRIES =>
+            {
+                if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                    stats.throttled_responses += 1;
+                } else {
+                    stats.server_error_responses += 1;
+                }
+                let retry_after = response
+                    .headers()
+                    .get(reqwest::header::RETRY_AFTER)
+                    .and_then(|value| value.to_str().ok())
+                    .and_then(|value| ncbi_retry_after_delay(value, chrono::Utc::now()))
+                    .unwrap_or_else(|| ncbi_retry_backoff(attempt));
+                let _ = response.bytes().await;
+                stats.retries += 1;
+                tokio::time::sleep(retry_after).await;
+            }
+            Ok(response) => return Ok(response),
+            Err(error)
+                if attempt < MAX_RETRIES
+                    && (error.is_timeout() || error.is_connect() || error.is_request()) =>
+            {
+                stats.transient_network_errors += 1;
+                stats.retries += 1;
+                tokio::time::sleep(ncbi_retry_backoff(attempt)).await;
+                tracing::warn!(
+                    attempt = attempt + 1,
+                    error = %error,
+                    "retrying transient NCBI request error"
+                );
+            }
+            Err(error) => {
+                return Err(FunctionCallError::RespondToModel(format!(
+                    "PubMed request failed after {} attempts: {error}",
+                    attempt + 1
+                )));
+            }
+        }
+    }
+    unreachable!("NCBI retry loop always returns on its final attempt")
+}
+
 fn pubmed_map_year_range(
     min_year: Option<u32>,
     max_year: Option<u32>,
@@ -755,30 +1367,31 @@ fn pubmed_map_query_degradations(esearch_json: &Value) -> Vec<String> {
 
 async fn http_get_json_with_query(
     client: &reqwest::Client,
+    cache: &PubmedCache,
+    stats: &mut NcbiRequestStats,
     url: &str,
     query: &[(&str, String)],
     label: &str,
 ) -> Result<Value, FunctionCallError> {
-    let response = client
-        .get(url)
-        .query(query)
-        .send()
-        .await
-        .map_err(http_error("PubMed request failed"))?;
-    parse_http_json(response, label).await
+    let text = http_get_text_with_query(client, cache, stats, url, query).await?;
+    serde_json::from_str(&text).map_err(|err| {
+        FunctionCallError::RespondToModel(format!("{label} response was not valid JSON: {err}"))
+    })
 }
 
 async fn http_get_text_with_query(
     client: &reqwest::Client,
+    cache: &PubmedCache,
+    stats: &mut NcbiRequestStats,
     url: &str,
     query: &[(&str, String)],
 ) -> Result<String, FunctionCallError> {
-    let response = client
-        .get(url)
-        .query(query)
-        .send()
-        .await
-        .map_err(http_error("PubMed request failed"))?;
+    stats.logical_requests += 1;
+    if let Some(cached) = cache.get(url, query) {
+        stats.cache_hits += 1;
+        return Ok(cached);
+    }
+    let response = ncbi_get_with_retry(client, url, query, stats).await?;
     let status = response.status();
     let text = response
         .text()
@@ -789,6 +1402,9 @@ async fn http_get_text_with_query(
             "PubMed request returned HTTP {status}: {}",
             truncate_for_error(&text)
         )));
+    }
+    if let Err(error) = cache.put(url, query, &text) {
+        tracing::warn!(error = %error, "failed to update PubMed response cache");
     }
     Ok(text)
 }
@@ -861,47 +1477,41 @@ fn medline_doi(fields: &[(String, String)]) -> Option<String> {
         })
 }
 
-fn render_pubmed_records_csv(records: &[PubmedMapRecord]) -> String {
-    let mut out =
-        "rank,pmid,title,authors,journal,publication_date,year,doi,citation_status,citation_warning,crossref_title_match,crossref_author_match,crossref_year_match,publication_types,mesh_terms,mesh_term_count,language,abstract,fetch_error\n"
-            .to_string();
-    for record in records {
-        let validation = record.citation_validation.as_ref();
-        out.push_str(&format!(
-            "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
-            record.rank,
-            csv_escape(&record.pmid),
-            csv_escape(&record.title),
-            csv_escape(&record.authors.join("; ")),
-            csv_escape(&record.journal),
-            csv_escape(&record.publication_date),
-            csv_escape(&pubmed_year_from_date(&record.publication_date).unwrap_or_default()),
-            csv_escape(&record.doi),
-            csv_escape(validation.map(|v| v.status.as_str()).unwrap_or_default()),
-            csv_escape(validation.map(|v| v.warning.as_str()).unwrap_or_default()),
-            csv_escape(&validation_bool(validation.and_then(|v| v.title_match))),
-            csv_escape(&validation_bool(validation.and_then(|v| v.authors_match))),
-            csv_escape(&validation_bool(validation.and_then(|v| v.year_match))),
-            csv_escape(&record.publication_types.join("; ")),
-            csv_escape(&record.mesh_terms.join("; ")),
-            record.mesh_term_count,
-            csv_escape(&record.language),
-            csv_escape(&record.abstract_text),
-            csv_escape(record.fetch_error.as_deref().unwrap_or_default()),
-        ));
-    }
-    out
-}
-
-fn render_pubmed_records_jsonl(records: &[PubmedMapRecord]) -> Result<String, FunctionCallError> {
-    let mut out = String::new();
-    for record in records {
-        let line = serde_json::to_string(&pubmed_record_json(record))
-            .map_err(json_error("serialize PubMed JSONL record"))?;
-        out.push_str(&line);
-        out.push('\n');
-    }
-    Ok(out)
+fn medline_relations(fields: &[(String, String)]) -> Vec<Value> {
+    fields
+        .iter()
+        .filter_map(|(tag, value)| {
+            let relation = match tag.as_str() {
+                "RIN" => "retracted_in",
+                "ROF" => "retraction_of",
+                "CRI" => "corrected_and_republished_in",
+                "CRF" => "corrected_and_republished_from",
+                "EIN" => "erratum_in",
+                "EFR" | "EON" => "erratum_for",
+                "CIN" => "comment_in",
+                "CON" => "comment_on",
+                "UIN" => "update_in",
+                "UOF" => "update_of",
+                _ => return None,
+            };
+            let pmid = value
+                .rfind("PMID:")
+                .and_then(|offset| value.get(offset + 5..))
+                .map(str::trim_start)
+                .and_then(|value| {
+                    let digits = value
+                        .chars()
+                        .take_while(char::is_ascii_digit)
+                        .collect::<String>();
+                    (!digits.is_empty()).then_some(digits)
+                });
+            Some(json!({
+                "type": relation,
+                "pmid": pmid,
+                "raw": value,
+            }))
+        })
+        .collect()
 }
 
 fn render_pubmed_report(
@@ -909,15 +1519,19 @@ fn render_pubmed_report(
     pubmed_query: &str,
     search: &PubmedMapSearchResult,
     citation_validation: &PubmedCitationValidationSummary,
+    ncbi_stats: &NcbiRequestStats,
 ) -> String {
     let mut out = String::new();
     out.push_str("# PubMed Literature Map\n\n");
+    out.push_str(
+        "> Content level: bibliographic metadata and abstracts (题录/摘要级内容), not full text.\n\n",
+    );
     out.push_str(&format!("Topic: {topic}\n\n"));
-    out.push_str(&format!("PubMed query: `{}`\n\n", pubmed_query));
+    out.push_str(&format!("PubMed query: `{pubmed_query}`\n\n"));
     if let Some(translation) = &search.query_translation
         && !translation.trim().is_empty()
     {
-        out.push_str(&format!("Query translation: `{}`\n\n", translation));
+        out.push_str(&format!("Query translation: `{translation}`\n\n"));
     }
     out.push_str(&format!(
         "Total PubMed hits: {}  \nReturned records: {}  \nDropped by esummary: {}\n\n",
@@ -927,6 +1541,13 @@ fn render_pubmed_report(
             .unwrap_or_else(|| "unknown".to_string()),
         search.records.len(),
         search.dropped_by_esummary
+    ));
+    out.push_str(&format!(
+        "NCBI logical requests: {}  \nCache hits: {}  \nNetwork attempts: {}  \nRetries: {}\n\n",
+        ncbi_stats.logical_requests,
+        ncbi_stats.cache_hits,
+        ncbi_stats.network_attempts,
+        ncbi_stats.retries,
     ));
     if !search.query_degraded.is_empty() {
         out.push_str("## Query Warnings\n\n");
@@ -974,12 +1595,15 @@ fn render_pubmed_report(
     }
 
     out.push_str("## PubMed Records\n\n");
-    out.push_str("| Rank | PMID | Year | Title | Journal | DOI | Citation |\n");
-    out.push_str("| ---: | --- | --- | --- | --- | --- | --- |\n");
+    out.push_str(
+        "| Rank | Literature ID | PMID | Year | Title | Journal | DOI | Citation | Vector |\n",
+    );
+    out.push_str("| ---: | --- | --- | --- | --- | --- | --- | --- | --- |\n");
     for record in &search.records {
         out.push_str(&format!(
-            "| {} | {} | {} | {} | {} | {} | {} |\n",
+            "| {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
             record.rank,
+            markdown_escape(&record.literature_id),
             markdown_escape(&record.pmid),
             markdown_escape(&pubmed_year_from_date(&record.publication_date).unwrap_or_default()),
             markdown_escape(&record.title),
@@ -992,6 +1616,7 @@ fn render_pubmed_report(
                     .map(|validation| validation.status.as_str())
                     .unwrap_or("")
             ),
+            markdown_escape(&record.vector_status),
         ));
     }
 
@@ -1029,6 +1654,18 @@ fn render_pubmed_report(
                 markdown_escape(&record.mesh_terms.join("; "))
             ));
         }
+        if !record.relations.is_empty() {
+            let relations = record
+                .relations
+                .iter()
+                .map(Value::to_string)
+                .collect::<Vec<_>>()
+                .join("; ");
+            out.push_str(&format!(
+                "Related records: {}\n\n",
+                markdown_escape(&relations)
+            ));
+        }
         if let Some(error) = &record.fetch_error {
             out.push_str(&format!("Fetch warning: {}\n\n", markdown_escape(error)));
         }
@@ -1041,7 +1678,7 @@ fn render_pubmed_report(
     }
     out.push_str("## Notes For Human Curation\n\n");
     out.push_str("- This workflow uses live PubMed metadata and optional MEDLINE details; verify query_translation before treating field filters as applied.\n");
-    out.push_str("- `pubmed_records.csv` is intended for screening and annotation.\n");
+    out.push_str("- `literature_ids.csv` is the canonical ranked output; metadata is resolved from the workspace literature registry.\n");
     out.push_str(
         "- Enable `validate_citations` for DOI/title/author/year checks before manuscript use.\n",
     );
@@ -1050,8 +1687,19 @@ fn render_pubmed_report(
 
 fn render_pubmed_citations_bib(records: &[PubmedMapRecord]) -> String {
     let mut out = String::new();
-    for record in records {
-        let key = format!("pmid_{}", sanitize_bib_key(&record.pmid));
+    for record in records
+        .iter()
+        .filter(|record| !record.literature_id.is_empty())
+    {
+        let key = format!(
+            "lit_{}",
+            record
+                .literature_id
+                .chars()
+                .filter(char::is_ascii_hexdigit)
+                .take(12)
+                .collect::<String>()
+        );
         out.push_str(&format!(
             "@article{{{},\n  title = {{{}}},\n",
             key,
@@ -1080,38 +1728,6 @@ fn render_pubmed_citations_bib(records: &[PubmedMapRecord]) -> String {
     out
 }
 
-fn pubmed_record_json(record: &PubmedMapRecord) -> Value {
-    json!({
-        "rank": record.rank,
-        "pmid": record.pmid,
-        "title": record.title,
-        "authors": record.authors,
-        "journal": record.journal,
-        "publication_date": record.publication_date,
-        "year": pubmed_year_from_date(&record.publication_date),
-        "doi": record.doi,
-        "abstract": record.abstract_text,
-        "publication_types": record.publication_types,
-        "mesh_terms": record.mesh_terms,
-        "mesh_term_count": record.mesh_term_count,
-        "language": record.language,
-        "fetch_error": record.fetch_error,
-        "citation_validation": record.citation_validation.as_ref().map(pubmed_citation_validation_json),
-    })
-}
-
-fn pubmed_citation_validation_json(validation: &PubmedCitationValidation) -> Value {
-    json!({
-        "status": validation.status,
-        "warning": validation.warning,
-        "title_match": validation.title_match,
-        "authors_match": validation.authors_match,
-        "year_match": validation.year_match,
-        "resolved_title": validation.resolved_title,
-        "resolved_year": validation.resolved_year,
-    })
-}
-
 fn pubmed_year_from_date(value: &str) -> Option<String> {
     let year = value.trim().chars().take(4).collect::<String>();
     if year.len() == 4 && year.chars().all(|ch| ch.is_ascii_digit()) {
@@ -1119,10 +1735,6 @@ fn pubmed_year_from_date(value: &str) -> Option<String> {
     } else {
         None
     }
-}
-
-fn validation_bool(value: Option<bool>) -> String {
-    value.map(|value| value.to_string()).unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -1157,6 +1769,7 @@ mod tests {
             "MH  - Stress, Physiological\n",
             "MH  - Neurodegenerative Diseases\n",
             "LA  - eng\n",
+            "ROF - Journal citation. PMID: 12345678\n",
         );
         let fields = parse_medline_fields(medline);
         assert_eq!(medline_first(&fields, "PMID").as_deref(), Some("33301246"));
@@ -1166,12 +1779,41 @@ mod tests {
         );
         assert_eq!(medline_all(&fields, "FAU").len(), 2);
         assert_eq!(medline_doi(&fields).as_deref(), Some("10.1000/test.2020.1"));
+        assert_eq!(medline_relations(&fields)[0]["pmid"], "12345678");
     }
 
     #[test]
-    fn renders_pubmed_records_outputs() {
+    fn parses_retry_after_seconds_and_http_date() {
+        let now = chrono::DateTime::parse_from_rfc3339("2015-10-21T07:27:00Z")
+            .expect("timestamp")
+            .with_timezone(&chrono::Utc);
+        assert_eq!(
+            ncbi_retry_after_delay("120", now),
+            Some(Duration::from_secs(120))
+        );
+        assert_eq!(
+            ncbi_retry_after_delay("Wed, 21 Oct 2015 07:28:00 GMT", now),
+            Some(Duration::from_secs(60))
+        );
+        assert_eq!(
+            ncbi_retry_after_delay("Wed, 21 Oct 2015 07:26:00 GMT", now),
+            Some(Duration::ZERO)
+        );
+        assert_eq!(ncbi_retry_after_delay("invalid", now), None);
+    }
+
+    #[test]
+    fn renders_stable_pubmed_citation() {
         let records = vec![PubmedMapRecord {
             rank: 1,
+            literature_id: "550e8400-e29b-41d4-a716-446655440000".to_string(),
+            review_case_id: None,
+            match_method: "strong_identifier".to_string(),
+            vector_status: "already_vectorized".to_string(),
+            expected_points: 1,
+            verified_points: 1,
+            existing_vector_dataset: Some("data-extract-new".to_string()),
+            vector_error: None,
             pmid: "33301246".to_string(),
             title: "Integrated stress response, aging, and disease".to_string(),
             authors: vec!["Doe, Jane".to_string(), "Smith, John".to_string()],
@@ -1183,6 +1825,7 @@ mod tests {
             mesh_terms: vec!["Stress, Physiological".to_string()],
             mesh_term_count: 1,
             language: "eng".to_string(),
+            relations: Vec::new(),
             fetch_error: None,
             citation_validation: Some(PubmedCitationValidation {
                 status: "verified".to_string(),
@@ -1194,19 +1837,8 @@ mod tests {
                 resolved_year: Some(2020),
             }),
         }];
-        let csv = render_pubmed_records_csv(&records);
-        assert!(csv.starts_with("rank,pmid,title,authors"));
-        assert!(csv.contains("citation_status"));
-        assert!(csv.contains("verified"));
-        assert!(csv.contains("33301246"));
-        assert!(csv.contains("2020"));
-
-        let jsonl = render_pubmed_records_jsonl(&records).unwrap();
-        assert!(jsonl.contains("\"pmid\":\"33301246\""));
-        assert!(jsonl.contains("\"citation_validation\""));
-
         let bib = render_pubmed_citations_bib(&records);
-        assert!(bib.contains("@article{pmid_33301246"));
+        assert!(bib.contains("@article{lit_550e8400e29b"));
         assert!(bib.contains("doi = {10.1000/test.2020.1}"));
     }
 
@@ -1214,6 +1846,14 @@ mod tests {
     fn converts_crossref_verdict_to_pubmed_citation_validation() {
         let record = PubmedMapRecord {
             rank: 1,
+            literature_id: "550e8400-e29b-41d4-a716-446655440000".to_string(),
+            review_case_id: None,
+            match_method: "strong_identifier".to_string(),
+            vector_status: "not_processed".to_string(),
+            expected_points: 0,
+            verified_points: 0,
+            existing_vector_dataset: None,
+            vector_error: None,
             pmid: "33301246".to_string(),
             title: "Integrated stress response, aging, and disease".to_string(),
             authors: vec!["Doe, Jane".to_string()],
@@ -1225,6 +1865,7 @@ mod tests {
             mesh_terms: Vec::new(),
             mesh_term_count: 0,
             language: String::new(),
+            relations: Vec::new(),
             fetch_error: None,
             citation_validation: None,
         };

@@ -17,7 +17,11 @@ pub(super) struct ScoredPoint {
 }
 
 fn point_id_string(point: &Value) -> String {
-    value_to_string(point.get("id").unwrap_or(&Value::Null))
+    match point.get("id").unwrap_or(&Value::Null) {
+        Value::String(id) => id.clone(),
+        Value::Null => String::new(),
+        id => id.to_string(),
+    }
 }
 
 /// Identify the source document a chunk belongs to, so multiple chunks of the

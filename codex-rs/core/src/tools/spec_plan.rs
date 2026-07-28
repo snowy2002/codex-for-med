@@ -598,6 +598,7 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, planned_tools: &mut
     planned_tools.add(ScienceWorkbenchHandler::describe_med_database());
     planned_tools.add(ScienceWorkbenchHandler::literature_map());
     planned_tools.add(ScienceWorkbenchHandler::pubmed_literature_map());
+    planned_tools.add(ScienceWorkbenchHandler::resolve_literature_review());
 
     if features.enabled(Feature::RequestPermissionsTool) {
         planned_tools.add(RequestPermissionsHandler);

@@ -491,6 +491,7 @@ async fn biomed_external_db_tools_are_core_visible_utilities() {
         "query_antibody_training_records",
         "search_vector_knowledge",
         "pubmed_literature_map",
+        "resolve_literature_review",
     ];
 
     plan.assert_visible_contains(&biomed_tools);

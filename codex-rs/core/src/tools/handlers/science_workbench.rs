@@ -8,10 +8,12 @@ use crate::tools::handlers::science_workbench_spec::DESCRIBE_MED_DATABASE_TOOL_N
 use crate::tools::handlers::science_workbench_spec::LIST_MED_KNOWLEDGE_COLLECTIONS_TOOL_NAME;
 use crate::tools::handlers::science_workbench_spec::LITERATURE_MAP_TOOL_NAME;
 use crate::tools::handlers::science_workbench_spec::PUBMED_LITERATURE_MAP_TOOL_NAME;
+use crate::tools::handlers::science_workbench_spec::RESOLVE_LITERATURE_REVIEW_TOOL_NAME;
 use crate::tools::handlers::science_workbench_spec::create_describe_med_database_tool;
 use crate::tools::handlers::science_workbench_spec::create_list_med_knowledge_collections_tool;
 use crate::tools::handlers::science_workbench_spec::create_literature_map_tool;
 use crate::tools::handlers::science_workbench_spec::create_pubmed_literature_map_tool;
+use crate::tools::handlers::science_workbench_spec::create_resolve_literature_review_tool;
 use crate::tools::registry::CoreToolRuntime;
 use crate::tools::registry::ToolExecutor;
 use codex_tools::ToolName;
@@ -27,11 +29,48 @@ use std::time::Duration;
 mod pubmed_literature_map;
 use self::pubmed_literature_map::PubmedLiteratureMapArgs;
 use self::pubmed_literature_map::pubmed_literature_map as run_pubmed_literature_map;
+#[path = "science_workbench/literature_artifacts.rs"]
+mod literature_artifacts;
+#[path = "science_workbench/literature_baseline.rs"]
+mod literature_baseline;
+#[path = "science_workbench/literature_legacy.rs"]
+mod literature_legacy;
+#[path = "science_workbench/literature_registry.rs"]
+mod literature_registry;
+#[path = "science_workbench/literature_registry_identity.rs"]
+mod literature_registry_identity;
+#[path = "science_workbench/literature_registry_merge.rs"]
+mod literature_registry_merge;
+#[path = "science_workbench/literature_registry_schema.rs"]
+mod literature_registry_schema;
+#[path = "science_workbench/literature_vector_jobs.rs"]
+mod literature_vector_jobs;
+#[path = "science_workbench/pubmed_cache.rs"]
+mod pubmed_cache;
+#[path = "science_workbench/pubmed_chunks.rs"]
+mod pubmed_chunks;
+#[path = "science_workbench/pubmed_vector_ingest.rs"]
+mod pubmed_vector_ingest;
+use self::literature_artifacts::commit_literature_run;
+use self::literature_artifacts::new_run_id;
+use self::literature_artifacts::recover_incomplete_literature_runs;
+use self::literature_artifacts::render_literature_ids;
+use self::literature_baseline::initialize_qdrant_baseline;
+use self::literature_legacy::migrate_legacy_project;
+use self::literature_registry::LiteratureInput;
+use self::literature_registry::LiteratureRegistry;
+use self::literature_registry::RegistrationOutcome;
+use self::literature_registry::SourceRecord;
+use self::literature_registry_identity::identifiers_from_source_uri;
+use self::literature_registry_identity::paper_id_from_source_uri;
+use self::pubmed_vector_ingest::PubmedVectorConfig;
+use self::pubmed_vector_ingest::PubmedVectorIngestor;
 #[path = "science_workbench/project_manifest.rs"]
 mod project_manifest;
 #[path = "science_workbench/rerank.rs"]
 mod rerank;
-use self::project_manifest::record_project_run;
+use self::project_manifest::record_project_run_unlocked;
+use self::project_manifest::with_project_lock;
 use self::rerank::LITERATURE_MAX_RECALL;
 use self::rerank::LITERATURE_RECALL_MULTIPLIER;
 use self::rerank::RERANKER_MODEL;
@@ -39,7 +78,8 @@ use self::rerank::ScoredPoint;
 use self::rerank::dedupe_points;
 use self::rerank::rerank_points;
 
-const HTTP_TIMEOUT: Duration = Duration::from_secs(45);
+const HTTP_TIMEOUT: Duration = Duration::from_secs(60);
+const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 const SQL_API_URL: &str = "http://150.5.166.194/sql";
 const SQL_API_TOKEN: &str = "bc62ea6d3039564fd945291fd29534e1b7e08c6cfe19d239dc28bbed69a8962c";
@@ -58,6 +98,7 @@ enum ScienceWorkbenchToolKind {
     DescribeMedDatabase,
     LiteratureMap,
     PubmedLiteratureMap,
+    ResolveLiteratureReview,
 }
 
 pub struct ScienceWorkbenchHandler {
@@ -85,9 +126,14 @@ impl ScienceWorkbenchHandler {
         Self::new(ScienceWorkbenchToolKind::PubmedLiteratureMap)
     }
 
+    pub fn resolve_literature_review() -> Self {
+        Self::new(ScienceWorkbenchToolKind::ResolveLiteratureReview)
+    }
+
     fn client() -> Result<reqwest::Client, FunctionCallError> {
         reqwest::Client::builder()
             .timeout(HTTP_TIMEOUT)
+            .connect_timeout(HTTP_CONNECT_TIMEOUT)
             .user_agent("codex-for-med/science-workbench")
             .build()
             .map_err(|err| FunctionCallError::Fatal(format!("failed to build HTTP client: {err}")))
@@ -104,6 +150,9 @@ impl ToolExecutor<ToolInvocation> for ScienceWorkbenchHandler {
             ScienceWorkbenchToolKind::DescribeMedDatabase => DESCRIBE_MED_DATABASE_TOOL_NAME,
             ScienceWorkbenchToolKind::LiteratureMap => LITERATURE_MAP_TOOL_NAME,
             ScienceWorkbenchToolKind::PubmedLiteratureMap => PUBMED_LITERATURE_MAP_TOOL_NAME,
+            ScienceWorkbenchToolKind::ResolveLiteratureReview => {
+                RESOLVE_LITERATURE_REVIEW_TOOL_NAME
+            }
         })
     }
 
@@ -115,6 +164,9 @@ impl ToolExecutor<ToolInvocation> for ScienceWorkbenchHandler {
             ScienceWorkbenchToolKind::DescribeMedDatabase => create_describe_med_database_tool(),
             ScienceWorkbenchToolKind::LiteratureMap => create_literature_map_tool(),
             ScienceWorkbenchToolKind::PubmedLiteratureMap => create_pubmed_literature_map_tool(),
+            ScienceWorkbenchToolKind::ResolveLiteratureReview => {
+                create_resolve_literature_review_tool()
+            }
         }
     }
 
@@ -158,6 +210,12 @@ impl ToolExecutor<ToolInvocation> for ScienceWorkbenchHandler {
                 let cwd = turn.cwd.as_path();
                 run_pubmed_literature_map(&client, args, cwd).await?
             }
+            ScienceWorkbenchToolKind::ResolveLiteratureReview => {
+                let args: ResolveLiteratureReviewArgs = parse_arguments(&arguments)?;
+                #[allow(deprecated)]
+                let cwd = turn.cwd.as_path();
+                resolve_literature_review(args, cwd).await?
+            }
         };
 
         Ok(boxed_tool_output(FunctionToolOutput::from_text(
@@ -168,6 +226,104 @@ impl ToolExecutor<ToolInvocation> for ScienceWorkbenchHandler {
 }
 
 impl CoreToolRuntime for ScienceWorkbenchHandler {}
+
+#[derive(Debug, Deserialize)]
+struct ResolveLiteratureReviewArgs {
+    action: ResolveLiteratureReviewAction,
+    review_case_id: String,
+    reason: String,
+    #[serde(default)]
+    canonical_literature_id: Option<String>,
+    #[serde(default)]
+    alias_literature_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ResolveLiteratureReviewAction {
+    MergeSame,
+    KeepDifferent,
+}
+
+async fn resolve_literature_review(
+    args: ResolveLiteratureReviewArgs,
+    cwd: &Path,
+) -> Result<String, FunctionCallError> {
+    let review_case_id = args.review_case_id.trim();
+    let reason = args.reason.trim();
+    if review_case_id.is_empty() || reason.is_empty() {
+        return Err(FunctionCallError::RespondToModel(
+            "review_case_id and reason must not be empty".to_string(),
+        ));
+    }
+    let registry = LiteratureRegistry::open_workspace(cwd)
+        .await
+        .map_err(|err| {
+            FunctionCallError::Fatal(format!("failed to open literature registry: {err:#}"))
+        })?;
+    match args.action {
+        ResolveLiteratureReviewAction::MergeSame => {
+            let canonical = args
+                .canonical_literature_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| {
+                    FunctionCallError::RespondToModel(
+                        "canonical_literature_id is required for merge_same".to_string(),
+                    )
+                })?;
+            let alias = args
+                .alias_literature_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| {
+                    FunctionCallError::RespondToModel(
+                        "alias_literature_id is required for merge_same".to_string(),
+                    )
+                })?;
+            let canonical = registry
+                .merge_literatures(
+                    canonical,
+                    alias,
+                    reason,
+                    Some(review_case_id),
+                    &chrono::Utc::now().to_rfc3339(),
+                )
+                .await
+                .map_err(|err| {
+                    FunctionCallError::RespondToModel(format!(
+                        "failed to resolve literature review: {err:#}"
+                    ))
+                })?;
+            pretty_json(json!({
+                "status": "resolved_same_literature",
+                "review_case_id": review_case_id,
+                "canonical_literature_id": canonical,
+                "alias_literature_id": alias,
+            }))
+        }
+        ResolveLiteratureReviewAction::KeepDifferent => {
+            registry
+                .resolve_review_as_different(
+                    review_case_id,
+                    reason,
+                    &chrono::Utc::now().to_rfc3339(),
+                )
+                .await
+                .map_err(|err| {
+                    FunctionCallError::RespondToModel(format!(
+                        "failed to resolve literature review: {err:#}"
+                    ))
+                })?;
+            pretty_json(json!({
+                "status": "resolved_different_literatures",
+                "review_case_id": review_case_id,
+            }))
+        }
+    }
+}
 
 #[derive(Debug, Deserialize)]
 struct DescribeMedDatabaseArgs {
@@ -297,6 +453,7 @@ async fn literature_map(
             "topic must not be empty".to_string(),
         ));
     }
+    let started_at = chrono::Utc::now();
     let project_id = args
         .project_id
         .as_deref()
@@ -321,46 +478,196 @@ async fn literature_map(
     // matches search_vector_knowledge, then aggregate chunks of the same document.
     let (ranked_points, rerank_used, rerank_note) =
         rerank_points(client, topic, recall_points).await;
-    let (deduped, total_chunks) = dedupe_points(ranked_points, top_k);
+    let (deduped, total_chunks) = dedupe_points(ranked_points, LITERATURE_MAX_RECALL);
 
-    let project_dir = cwd.join("research_projects").join(&project_id);
-    let literature_dir = project_dir.join("literature");
-    let code_dir = project_dir.join("code");
-    let provenance_dir = project_dir.join("provenance");
-    let figures_dir = project_dir.join("figures");
-    let analysis_dir = project_dir.join("analysis");
-    fs::create_dir_all(&literature_dir).map_err(fs_error("create literature directory"))?;
-    fs::create_dir_all(&code_dir).map_err(fs_error("create code directory"))?;
-    fs::create_dir_all(&provenance_dir).map_err(fs_error("create provenance directory"))?;
-    fs::create_dir_all(&figures_dir).map_err(fs_error("create figures directory"))?;
-    fs::create_dir_all(&analysis_dir).map_err(fs_error("create analysis directory"))?;
+    let observed_at = chrono::Utc::now();
+    let now_rfc3339 = observed_at.to_rfc3339();
+    let run_id = new_run_id(&started_at, "literature_map");
+    let registry = LiteratureRegistry::open_workspace(cwd)
+        .await
+        .map_err(|err| {
+            FunctionCallError::Fatal(format!("failed to open literature registry: {err:#}"))
+        })?;
+    let baseline_initialization = if std::env::var("CODEX_MED_INITIALIZE_LITERATURE_BASELINE")
+        .is_ok_and(|value| value == "1")
+    {
+        let qdrant_url = std::env::var("CODEX_MED_VECTOR_QDRANT_URL")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| QDRANT_URL.to_string());
+        let collection = std::env::var("CODEX_MED_VECTOR_COLLECTION")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| QDRANT_COLLECTION.to_string());
+        let api_key = std::env::var("CODEX_MED_VECTOR_QDRANT_API_KEY")
+            .ok()
+            .or_else(|| std::env::var("QDRANT_API_KEY").ok())
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| QDRANT_API_KEY.to_string());
+        Some(
+            initialize_qdrant_baseline(
+                client,
+                &registry,
+                cwd,
+                &qdrant_url,
+                &collection,
+                &api_key,
+                &now_rfc3339,
+            )
+            .await
+            .map_err(|err| {
+                FunctionCallError::Fatal(format!(
+                    "failed to initialize literature registry baseline: {err:#}"
+                ))
+            })?,
+        )
+    } else {
+        None
+    };
+    let mut evidence_rows: Vec<EvidenceRow> = Vec::new();
+    let mut canonical_indexes: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    let mut registration_conflicts = Vec::new();
+    for scored in &deduped {
+        let mut row = evidence_row(evidence_rows.len() + 1, scored);
+        let (pmid, doi) = identifiers_from_source_uri(&row.source_uri);
+        let paper_id = (!row.paper_id.trim().is_empty())
+            .then(|| row.paper_id.clone())
+            .or_else(|| paper_id_from_source_uri(&row.source_uri));
+        let source = (!row.document_id.trim().is_empty()).then(|| SourceRecord {
+            system: format!("qdrant:{QDRANT_COLLECTION}"),
+            key: row.document_id.clone(),
+            match_method: "qdrant_document".to_string(),
+        });
+        let registration = registry
+            .register(
+                LiteratureInput {
+                    pmid,
+                    doi,
+                    paper_id,
+                    title: Some(row.title.clone()),
+                    metadata: json!({
+                        "raw_identifiers": {
+                            "paper_id": row.paper_id,
+                            "source_uri": row.source_uri,
+                        },
+                        "field_sources": {
+                            "title": {
+                                "source": format!("qdrant:{QDRANT_COLLECTION}"),
+                                "observed_at": now_rfc3339,
+                            }
+                        }
+                    }),
+                    ..Default::default()
+                },
+                source,
+                &now_rfc3339,
+            )
+            .await
+            .map_err(|err| {
+                FunctionCallError::Fatal(format!(
+                    "failed to register local literature metadata: {err:#}"
+                ))
+            })?;
+        let registered = match registration {
+            RegistrationOutcome::Registered(registered) => registered,
+            RegistrationOutcome::Conflict {
+                review_case_id,
+                matched_literature_ids,
+            } => {
+                registration_conflicts.push(json!({
+                    "review_case_id": review_case_id,
+                    "matched_literature_ids": matched_literature_ids,
+                    "document_id": row.document_id,
+                    "paper_id": row.paper_id,
+                }));
+                continue;
+            }
+        };
+        row.literature_id = registered.literature_id;
+        row.review_case_id = registered.review_case_id;
+        row.match_method = registered.match_method;
+        row.duplicate_status = if row.review_case_id.is_some() {
+            "possible_duplicate".to_string()
+        } else {
+            "canonical".to_string()
+        };
+        if let Some(existing_index) = canonical_indexes.get(&row.literature_id).copied() {
+            evidence_rows[existing_index].chunk_count += row.chunk_count;
+            evidence_rows[existing_index]
+                .matched_documents
+                .push(row.document_id);
+            continue;
+        }
+        canonical_indexes.insert(row.literature_id.clone(), evidence_rows.len());
+        row.rank = evidence_rows.len() + 1;
+        evidence_rows.push(row);
+        if evidence_rows.len() >= top_k {
+            break;
+        }
+    }
 
-    let evidence_rows = deduped
+    let literature_ids = evidence_rows
         .iter()
-        .enumerate()
-        .map(|(idx, scored)| evidence_row(idx + 1, scored))
+        .map(|row| row.literature_id.clone())
         .collect::<Vec<_>>();
-
-    let evidence_csv = render_evidence_csv(&evidence_rows);
+    for row in &mut evidence_rows {
+        let literature = registry
+            .get(&row.literature_id)
+            .await
+            .map_err(|err| {
+                FunctionCallError::Fatal(format!(
+                    "failed to resolve global literature metadata: {err:#}"
+                ))
+            })?
+            .ok_or_else(|| {
+                FunctionCallError::Fatal(format!(
+                    "global literature metadata {} disappeared during the run",
+                    row.literature_id
+                ))
+            })?;
+        row.apply_global_metadata(&literature);
+    }
+    let ids_csv = render_literature_ids(&literature_ids);
     let report = render_literature_report(topic, args.year_range.as_deref(), &evidence_rows);
     let citations = render_citations_bib(&evidence_rows);
+    let project_dir = cwd.join("research_projects").join(&project_id);
+    let finished_at = chrono::Utc::now().to_rfc3339();
+    let run_status = if registration_conflicts.is_empty() {
+        "completed"
+    } else {
+        "completed_with_errors"
+    };
 
-    // Read the wall clock exactly once and thread it (as strings) into the pure
-    // manifest builder, so the run-registry/merge logic stays unit-testable.
-    let now = chrono::Utc::now();
-    let now_rfc3339 = now.to_rfc3339();
-    let run_id = format!("{}_literature_map", now.format("%Y-%m-%dT%H%M%SZ"));
-
-    let run = json!({
+    let mut run = json!({
+        "schema_version": 1,
         "workflow": "literature_map",
         "run_id": run_id,
-        "run_at": now_rfc3339,
+        "started_at": started_at.to_rfc3339(),
+        "finished_at": finished_at,
+        "status": run_status,
         "project_id": project_id,
         "topic": topic,
         "year_range": args.year_range,
         "top_k": top_k,
         "recall_top_k": recall_k,
         "category": category,
+        "input": {
+            "original": {
+                "topic": args.topic,
+                "project_id": args.project_id,
+                "year_range": args.year_range,
+                "top_k": args.top_k,
+                "category": args.category,
+            },
+            "normalized": {
+                "topic": topic,
+                "project_id": project_id,
+                "year_range": args.year_range,
+                "top_k": top_k,
+                "category": category,
+            }
+        },
         "backends": {
             "vector": {
                 "provider": "qdrant",
@@ -376,42 +683,83 @@ async fn literature_map(
         },
         "deduplication": {
             "enabled": true,
-            "keys": ["paper_id", "document_id", "source_uri", "title"],
-            "distinct_documents": evidence_rows.len(),
+            "document_keys": ["paper_id", "document_id", "source_uri", "title"],
+            "final_key": "canonical_literature_id",
+            "distinct_literatures": evidence_rows.len(),
             "chunks_considered": total_chunks
         },
-        "outputs": {
-            "evidence_table": relative_display(&project_dir, &literature_dir.join("evidence_table.csv")),
-            "report": relative_display(&project_dir, &literature_dir.join("report.md")),
-            "citations": relative_display(&project_dir, &literature_dir.join("citations.bib"))
-        },
-        "evidence_count": evidence_rows.len()
+        "registry": relative_display(cwd, registry.path()),
+        "baseline_initialization": baseline_initialization,
+        "registration_conflicts": registration_conflicts,
+        "errors": registration_conflicts.iter().map(|conflict| json!({
+            "stage": "sqlite_registration",
+            "retryable": false,
+            "recovery": "Resolve the review_case_id before rerunning the affected record.",
+            "details": conflict,
+        })).collect::<Vec<_>>(),
+        "hits": evidence_rows.iter().map(|row| json!({
+            "rank": row.rank,
+            "literature_id": row.literature_id,
+            "paper_id": row.paper_id,
+            "document_id": row.document_id,
+            "source_uri": row.source_uri,
+            "external_identifiers": {
+                "paper_id": row.paper_id,
+                "doi": row.doi,
+            },
+            "matched_documents": row.matched_documents,
+            "match_method": row.match_method,
+            "duplicate_status": row.duplicate_status,
+            "vector_job_status": "already_vectorized",
+            "vector_score": row.score,
+            "rerank_score": row.rerank_score,
+            "chunk_count": row.chunk_count,
+            "review_case_id": row.review_case_id,
+        })).collect::<Vec<_>>(),
+        "counts": {
+            "input_chunks": total_chunks,
+            "output_literatures": evidence_rows.len(),
+            "registration_conflicts": registration_conflicts.len(),
+            "vector_statuses": {
+                "already_vectorized": evidence_rows.len(),
+            },
+        }
     });
 
-    write_file(&literature_dir.join("evidence_table.csv"), &evidence_csv)?;
-    write_file(&literature_dir.join("report.md"), &report)?;
-    write_file(&literature_dir.join("citations.bib"), &citations)?;
-    write_file(
-        &provenance_dir.join("run.json"),
-        &serde_json::to_string_pretty(&run).map_err(json_error("serialize run provenance"))?,
-    )?;
-
-    let manifest_path = record_project_run(
-        &project_dir,
-        &project_id,
-        topic,
-        &now_rfc3339,
-        run,
-        &provenance_dir.join("run.json"),
-        &[
-            (
-                "evidence_table",
-                literature_dir.join("evidence_table.csv").as_path(),
-            ),
-            ("report", literature_dir.join("report.md").as_path()),
-            ("citations", literature_dir.join("citations.bib").as_path()),
-        ],
-    )?;
+    let (committed, manifest_path) = with_project_lock(&project_dir, || {
+        let legacy_migration = migrate_legacy_project(&project_dir)?;
+        let recovered_runs = recover_incomplete_literature_runs(&project_dir)?;
+        if let Some(object) = run.as_object_mut() {
+            object.insert("legacy_migration".to_string(), json!(legacy_migration));
+            object.insert("recovered_runs".to_string(), json!(recovered_runs));
+        }
+        let committed = commit_literature_run(
+            cwd,
+            &project_id,
+            "local",
+            "literature_map",
+            &run_id,
+            &ids_csv,
+            &report,
+            &citations,
+            run.clone(),
+        )?;
+        let manifest_path = record_project_run_unlocked(
+            &committed.project_dir,
+            &project_id,
+            topic,
+            &finished_at,
+            run.clone(),
+            "local",
+            &committed.provenance,
+            &[
+                ("literature_ids", &committed.latest_ids),
+                ("report", &committed.latest_report),
+                ("citations", &committed.latest_citations),
+            ],
+        )?;
+        Ok((committed, manifest_path))
+    })?;
 
     let output = json!({
         "project_id": project_id,
@@ -424,15 +772,16 @@ async fn literature_map(
         "rerank_used": rerank_used,
         "manifest": manifest_path,
         "created_files": [
-            literature_dir.join("evidence_table.csv"),
-            literature_dir.join("report.md"),
-            literature_dir.join("citations.bib"),
-            provenance_dir.join("run.json"),
+            committed.latest_ids,
+            committed.latest_report,
+            committed.latest_citations,
+            committed.provenance,
+            committed.snapshot_dir,
             manifest_path
         ],
         "next_steps": [
-            "Review literature/evidence_table.csv; chunk_count shows how many chunks backed each document.",
-            "Use report.md as the first evidence map draft.",
+            "Review literature/local/literature_ids.csv and report.md.",
+            "Inspect this run's provenance for scores, chunk counts, and review cases.",
             "Add human curation notes before using the map in a manuscript."
         ]
     });
@@ -440,7 +789,7 @@ async fn literature_map(
 }
 
 async fn sql_schema(client: &reqwest::Client) -> Result<Value, FunctionCallError> {
-    let url = format!("{}/schema", SQL_API_URL);
+    let url = format!("{SQL_API_URL}/schema");
     let response = client
         .get(url)
         .bearer_auth(SQL_API_TOKEN)
@@ -630,10 +979,6 @@ fn fs_error(
     move |err| FunctionCallError::RespondToModel(format!("{context}: {err}"))
 }
 
-fn write_file(path: &Path, contents: &str) -> Result<(), FunctionCallError> {
-    fs::write(path, contents).map_err(fs_error("write research project file"))
-}
-
 fn pretty_json(value: Value) -> Result<String, FunctionCallError> {
     serde_json::to_string_pretty(&value).map_err(json_error("serialize JSON output"))
 }
@@ -652,18 +997,24 @@ fn truncate_for_error(value: &str) -> String {
 #[derive(Debug)]
 struct EvidenceRow {
     rank: usize,
+    literature_id: String,
+    review_case_id: Option<String>,
     score: f64,
     rerank_score: Option<f64>,
     chunk_count: usize,
-    point_id: String,
     document_id: String,
     chunk_id: String,
     paper_id: String,
-    category: String,
-    source_type: String,
     title: String,
     source_uri: String,
     snippet: String,
+    authors: Vec<String>,
+    journal: String,
+    publication_date: String,
+    doi: String,
+    match_method: String,
+    duplicate_status: String,
+    matched_documents: Vec<String>,
 }
 
 fn evidence_row(rank: usize, scored: &ScoredPoint) -> EvidenceRow {
@@ -671,21 +1022,42 @@ fn evidence_row(rank: usize, scored: &ScoredPoint) -> EvidenceRow {
     let payload = point.get("payload").unwrap_or(&Value::Null);
     EvidenceRow {
         rank,
+        literature_id: String::new(),
+        review_case_id: None,
         score: point
             .get("score")
             .and_then(Value::as_f64)
             .unwrap_or_default(),
         rerank_score: scored.rerank_score,
         chunk_count: scored.chunk_count,
-        point_id: value_to_string(point.get("id").unwrap_or(&Value::Null)),
         document_id: payload_string(payload, "document_id"),
         chunk_id: payload_string(payload, "chunk_id"),
         paper_id: payload_string(payload, "paper_id"),
-        category: payload_string(payload, "category"),
-        source_type: payload_string(payload, "source_type"),
         title: payload_string(payload, "title"),
         source_uri: payload_string(payload, "source_uri"),
         snippet: first_non_empty_payload(payload, &["snippet", "text", "content"]),
+        authors: Vec::new(),
+        journal: String::new(),
+        publication_date: String::new(),
+        doi: String::new(),
+        match_method: String::new(),
+        duplicate_status: "canonical".to_string(),
+        matched_documents: vec![payload_string(payload, "document_id")],
+    }
+}
+
+impl EvidenceRow {
+    fn apply_global_metadata(&mut self, literature: &literature_registry::Literature) {
+        if let Some(title) = literature.title.as_deref() {
+            self.title = title.to_string();
+        }
+        if let Some(paper_id) = literature.paper_id.as_deref() {
+            self.paper_id = paper_id.to_string();
+        }
+        self.authors = literature.authors.clone();
+        self.journal = literature.journal.clone().unwrap_or_default();
+        self.publication_date = literature.publication_date.clone().unwrap_or_default();
+        self.doi = literature.doi.clone().unwrap_or_default();
     }
 }
 
@@ -709,41 +1081,6 @@ fn first_non_empty_payload(payload: &Value, keys: &[&str]) -> String {
     String::new()
 }
 
-fn value_to_string(value: &Value) -> String {
-    match value {
-        Value::String(s) => s.clone(),
-        Value::Null => String::new(),
-        other => other.to_string(),
-    }
-}
-
-fn render_evidence_csv(rows: &[EvidenceRow]) -> String {
-    let mut out =
-        "rank,score,rerank_score,chunk_count,point_id,document_id,chunk_id,paper_id,category,source_type,title,source_uri,snippet\n"
-            .to_string();
-    for row in rows {
-        out.push_str(&format!(
-            "{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
-            row.rank,
-            row.score,
-            row.rerank_score
-                .map(|score| score.to_string())
-                .unwrap_or_default(),
-            row.chunk_count,
-            csv_escape(&row.point_id),
-            csv_escape(&row.document_id),
-            csv_escape(&row.chunk_id),
-            csv_escape(&row.paper_id),
-            csv_escape(&row.category),
-            csv_escape(&row.source_type),
-            csv_escape(&row.title),
-            csv_escape(&row.source_uri),
-            csv_escape(&row.snippet),
-        ));
-    }
-    out
-}
-
 fn render_literature_report(topic: &str, year_range: Option<&str>, rows: &[EvidenceRow]) -> String {
     let mut out = String::new();
     out.push_str("# Literature Map\n\n");
@@ -754,16 +1091,19 @@ fn render_literature_report(topic: &str, year_range: Option<&str>, rows: &[Evide
         out.push_str(&format!("Year range: {}\n\n", year_range.trim()));
     }
     out.push_str("## Evidence Table Summary\n\n");
-    out.push_str("| Rank | Rerank | Vector | Chunks | Paper ID | Title | Source |\n");
-    out.push_str("| ---: | ---: | ---: | ---: | --- | --- | --- |\n");
+    out.push_str(
+        "| Rank | Literature ID | Rerank | Vector | Chunks | Paper ID | Title | Source |\n",
+    );
+    out.push_str("| ---: | --- | ---: | ---: | ---: | --- | --- | --- |\n");
     for row in rows {
         let rerank = row
             .rerank_score
             .map(|score| format!("{score:.4}"))
             .unwrap_or_else(|| "-".to_string());
         out.push_str(&format!(
-            "| {} | {} | {:.4} | {} | {} | {} | {} |\n",
+            "| {} | {} | {} | {:.4} | {} | {} | {} | {} |\n",
             row.rank,
+            row.literature_id,
             rerank,
             row.score,
             row.chunk_count,
@@ -803,19 +1143,42 @@ fn render_literature_report(topic: &str, year_range: Option<&str>, rows: &[Evide
 fn render_citations_bib(rows: &[EvidenceRow]) -> String {
     let mut out = String::new();
     for row in rows {
-        let key = if row.paper_id.is_empty() {
-            format!("codex_med_chunk_{}", row.rank)
-        } else {
-            sanitize_bib_key(&row.paper_id)
-        };
+        let key = format!(
+            "lit_{}",
+            row.literature_id
+                .chars()
+                .filter(char::is_ascii_hexdigit)
+                .take(12)
+                .collect::<String>()
+        );
         out.push_str(&format!(
-            "@misc{{{},\n  title = {{{}}},\n  howpublished = {{{}}},\n  note = {{codex-med vector chunk {}; document_id={}; aggregated_chunks={}}}\n}}\n\n",
+            "@misc{{{},\n  title = {{{}}},\n",
             key,
             bib_escape(if row.title.is_empty() {
                 &row.document_id
             } else {
                 &row.title
             }),
+        ));
+        if !row.authors.is_empty() {
+            out.push_str(&format!(
+                "  author = {{{}}},\n",
+                bib_escape(&row.authors.join(" and "))
+            ));
+        }
+        if !row.journal.is_empty() {
+            out.push_str(&format!("  journal = {{{}}},\n", bib_escape(&row.journal)));
+        }
+        if let Some(year) = row.publication_date.get(..4)
+            && year.chars().all(|ch| ch.is_ascii_digit())
+        {
+            out.push_str(&format!("  year = {{{year}}},\n"));
+        }
+        if !row.doi.is_empty() {
+            out.push_str(&format!("  doi = {{{}}},\n", bib_escape(&row.doi)));
+        }
+        out.push_str(&format!(
+            "  howpublished = {{{}}},\n  note = {{codex-med vector chunk {}; document_id={}; aggregated_chunks={}}}\n}}\n\n",
             bib_escape(&row.source_uri),
             row.chunk_id,
             row.document_id,
@@ -825,32 +1188,12 @@ fn render_citations_bib(rows: &[EvidenceRow]) -> String {
     out
 }
 
-fn csv_escape(value: &str) -> String {
-    if value.contains(',') || value.contains('"') || value.contains('\n') || value.contains('\r') {
-        format!("\"{}\"", value.replace('"', "\"\""))
-    } else {
-        value.to_string()
-    }
-}
-
 fn markdown_escape(value: &str) -> String {
     value.replace('|', "\\|").replace('\n', " ")
 }
 
 fn bib_escape(value: &str) -> String {
     value.replace('{', "\\{").replace('}', "\\}")
-}
-
-fn sanitize_bib_key(value: &str) -> String {
-    let key = value
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
-        .collect::<String>();
-    if key.is_empty() {
-        "codex_med_source".to_string()
-    } else {
-        key
-    }
 }
 
 fn slugify_project_id(value: &str) -> String {
@@ -893,18 +1236,5 @@ mod tests {
             "integrated_stress_response_aging"
         );
         assert_eq!(slugify_project_id(""), "literature_map");
-    }
-
-    #[test]
-    fn csv_escapes_special_characters() {
-        assert_eq!(csv_escape("plain"), "plain");
-        assert_eq!(csv_escape("a,b"), "\"a,b\"");
-        assert_eq!(csv_escape("a\"b"), "\"a\"\"b\"");
-    }
-
-    #[test]
-    fn renders_evidence_csv_header() {
-        let csv = render_evidence_csv(&[]);
-        assert!(csv.starts_with("rank,score,rerank_score,chunk_count,point_id"));
     }
 }

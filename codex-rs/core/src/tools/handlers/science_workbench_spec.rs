@@ -7,6 +7,7 @@ pub const LIST_MED_KNOWLEDGE_COLLECTIONS_TOOL_NAME: &str = "list_med_knowledge_c
 pub const DESCRIBE_MED_DATABASE_TOOL_NAME: &str = "describe_med_database";
 pub const LITERATURE_MAP_TOOL_NAME: &str = "literature_map";
 pub const PUBMED_LITERATURE_MAP_TOOL_NAME: &str = "pubmed_literature_map";
+pub const RESOLVE_LITERATURE_REVIEW_TOOL_NAME: &str = "resolve_literature_review";
 
 pub fn create_list_med_knowledge_collections_tool() -> ToolSpec {
     ToolSpec::Function(ResponsesApiTool {
@@ -89,7 +90,7 @@ pub fn create_literature_map_tool() -> ToolSpec {
 
     ToolSpec::Function(ResponsesApiTool {
         name: LITERATURE_MAP_TOOL_NAME.to_string(),
-        description: "Map the literature for a topic from the codex-med vector knowledge base into a reproducible research_projects/<project_id>/ directory of reranked, per-document evidence: an evidence table, report, BibTeX citations, and a provenance record. Use when a topic calls for a durable, citable evidence package rather than an answer in chat, and re-run the same project_id to append a run to its history. Use search_vector_knowledge instead for a quick lookup that needs no files on disk."
+        description: "Map a topic from the codex-med vector knowledge base into a reproducible research_projects/<project_id>/ package. Results are registered in the workspace literature registry and the canonical ranked output is literature/local/literature_ids.csv, with a report, BibTeX citations, immutable run snapshot, provenance, and merged project manifest. Re-running the same project_id preserves history. Use search_vector_knowledge instead for a quick lookup that needs no files on disk."
             .to_string(),
         strict: false,
         defer_loading: None,
@@ -169,7 +170,14 @@ pub fn create_pubmed_literature_map_tool() -> ToolSpec {
         (
             "validate_citations".to_string(),
             JsonSchema::boolean(Some(
-                "Whether to validate DOI-bearing PubMed records against Crossref and annotate citation status in CSV, JSONL, report, and provenance. Defaults to false."
+                "Whether to validate DOI-bearing PubMed records against Crossref and annotate citation status in the report and provenance. Defaults to false."
+                    .to_string(),
+            )),
+        ),
+        (
+            "force_refresh".to_string(),
+            JsonSchema::boolean(Some(
+                "Whether to bypass the seven-day workspace PubMed response cache for this run. Defaults to false."
                     .to_string(),
             )),
         ),
@@ -177,13 +185,72 @@ pub fn create_pubmed_literature_map_tool() -> ToolSpec {
 
     ToolSpec::Function(ResponsesApiTool {
         name: PUBMED_LITERATURE_MAP_TOOL_NAME.to_string(),
-        description: "Build a PubMed-backed literature map without changing the vector-only literature_map workflow: search PubMed, optionally fetch abstracts and MeSH terms for each PMID, then write research_projects/<project_id>/ literature records, report, BibTeX citations, provenance, and project manifest."
+        description: "Build a PubMed-backed literature map: search PubMed, optionally fetch abstracts and MeSH terms, register canonical identities in the workspace literature registry, and write literature/pubmed/literature_ids.csv with a report, BibTeX citations, immutable run snapshot, provenance, and merged project manifest. Safe vector ingestion is recorded for each article; Qdrant writes remain disabled unless CODEX_MED_PUBMED_VECTOR_WRITES=1."
             .to_string(),
         strict: false,
         defer_loading: None,
         parameters: JsonSchema::object(
             properties,
             Some(vec!["topic".to_string()]),
+            Some(false.into()),
+        ),
+        output_schema: None,
+    })
+}
+
+pub fn create_resolve_literature_review_tool() -> ToolSpec {
+    let properties = BTreeMap::from([
+        (
+            "action".to_string(),
+            JsonSchema::string_enum(
+                vec![
+                    serde_json::json!("merge_same"),
+                    serde_json::json!("keep_different"),
+                ],
+                Some(
+                    "Use merge_same only after confirming two IDs are the same publication; use keep_different after confirming the candidate is distinct."
+                        .to_string(),
+                ),
+            ),
+        ),
+        (
+            "review_case_id".to_string(),
+            JsonSchema::string(Some("Required pending review case ID.".to_string())),
+        ),
+        (
+            "canonical_literature_id".to_string(),
+            JsonSchema::string(Some(
+                "Required for merge_same: the literature ID that must survive.".to_string(),
+            )),
+        ),
+        (
+            "alias_literature_id".to_string(),
+            JsonSchema::string(Some(
+                "Required for merge_same: the literature ID to preserve as an alias."
+                    .to_string(),
+            )),
+        ),
+        (
+            "reason".to_string(),
+            JsonSchema::string(Some(
+                "Required human review rationale recorded with the resolution.".to_string(),
+            )),
+        ),
+    ]);
+
+    ToolSpec::Function(ResponsesApiTool {
+        name: RESOLVE_LITERATURE_REVIEW_TOOL_NAME.to_string(),
+        description: "Resolve a pending literature possible-duplicate review after explicit human confirmation. It either transactionally merges two IDs while preserving an alias, or records that they are different and releases the blocked vector job. Never use identifier similarity alone as approval."
+            .to_string(),
+        strict: false,
+        defer_loading: None,
+        parameters: JsonSchema::object(
+            properties,
+            Some(vec![
+                "action".to_string(),
+                "review_case_id".to_string(),
+                "reason".to_string(),
+            ]),
             Some(false.into()),
         ),
         output_schema: None,

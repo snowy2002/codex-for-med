@@ -25,10 +25,25 @@ fn creates_science_workbench_tool_specs() {
     };
     assert_eq!(pubmed_tool.name, PUBMED_LITERATURE_MAP_TOOL_NAME);
     assert!(pubmed_tool.description.contains("PubMed"));
-    assert!(pubmed_tool.description.contains("literature_map"));
+    assert!(pubmed_tool.description.contains("literature_ids.csv"));
     assert!(
         serde_json::to_string(&pubmed_tool.parameters)
             .unwrap()
             .contains("validate_citations")
+    );
+    assert!(
+        serde_json::to_string(&pubmed_tool.parameters)
+            .unwrap()
+            .contains("force_refresh")
+    );
+
+    let ToolSpec::Function(review_tool) = create_resolve_literature_review_tool() else {
+        panic!("resolve_literature_review should be a function tool");
+    };
+    assert_eq!(review_tool.name, RESOLVE_LITERATURE_REVIEW_TOOL_NAME);
+    assert!(
+        review_tool
+            .description
+            .contains("explicit human confirmation")
     );
 }
