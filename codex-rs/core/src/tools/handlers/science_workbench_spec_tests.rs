@@ -36,6 +36,11 @@ fn creates_science_workbench_tool_specs() {
             .unwrap()
             .contains("force_refresh")
     );
+    assert!(
+        serde_json::to_string(&pubmed_tool.parameters)
+            .unwrap()
+            .contains("require_vector_complete")
+    );
 
     let ToolSpec::Function(review_tool) = create_resolve_literature_review_tool() else {
         panic!("resolve_literature_review should be a function tool");

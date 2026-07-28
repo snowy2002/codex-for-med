@@ -30,6 +30,8 @@ pub(super) struct PubmedLiteratureMapArgs {
     validate_citations: bool,
     #[serde(default)]
     force_refresh: bool,
+    #[serde(default)]
+    require_vector_complete: bool,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
@@ -357,6 +359,21 @@ pub(super) async fn pubmed_literature_map(
             counts
         },
     );
+    let incomplete_vectors = search
+        .records
+        .iter()
+        .filter(|record| !vector_status_is_complete(&record.vector_status))
+        .map(|record| {
+            json!({
+                "literature_id": record.literature_id,
+                "pmid": record.pmid,
+                "status": record.vector_status,
+                "review_case_id": record.review_case_id,
+                "error": record.vector_error,
+            })
+        })
+        .collect::<Vec<_>>();
+    let strict_vector_failure = args.require_vector_complete && !incomplete_vectors.is_empty();
     let mut run_errors = registration_conflicts
         .iter()
         .map(|conflict| {
@@ -414,8 +431,18 @@ pub(super) async fn pubmed_literature_map(
             "message": degradation,
         }));
     }
+    if strict_vector_failure {
+        run_errors.push(json!({
+            "stage": "vector_completeness",
+            "retryable": true,
+            "recovery": "Resolve review cases or vector errors, enable writes if appropriate, and rerun reconciliation.",
+            "incomplete_records": incomplete_vectors,
+        }));
+    }
     let finished_at = chrono::Utc::now().to_rfc3339();
-    let run_status = if run_errors.is_empty() {
+    let run_status = if strict_vector_failure {
+        "failed"
+    } else if run_errors.is_empty() {
         "completed"
     } else {
         "completed_with_errors"
@@ -487,6 +514,7 @@ pub(super) async fn pubmed_literature_map(
         "max_mesh_terms": max_mesh_terms,
         "validate_citations": args.validate_citations,
         "force_refresh": args.force_refresh,
+        "require_vector_complete": args.require_vector_complete,
         "input": {
             "original": {
                 "topic": args.topic,
@@ -500,6 +528,7 @@ pub(super) async fn pubmed_literature_map(
                 "max_mesh_terms": args.max_mesh_terms,
                 "validate_citations": args.validate_citations,
                 "force_refresh": args.force_refresh,
+                "require_vector_complete": args.require_vector_complete,
             },
             "normalized": {
                 "topic": topic,
@@ -512,6 +541,7 @@ pub(super) async fn pubmed_literature_map(
                 "max_mesh_terms": max_mesh_terms,
                 "validate_citations": args.validate_citations,
                 "force_refresh": args.force_refresh,
+                "require_vector_complete": args.require_vector_complete,
             },
         },
         "cache": relative_display(cwd, &cwd.join(".codex-med").join("cache").join("pubmed")),
@@ -521,6 +551,7 @@ pub(super) async fn pubmed_literature_map(
             "embedding_profile": super::pubmed_chunks::PUBMED_EMBEDDING_PROFILE,
             "writes_enabled": vector_writes_enabled,
             "registry_backup": vector_registry_backup,
+            "require_complete": args.require_vector_complete,
         },
         "backends": {
             "pubmed": {
@@ -604,6 +635,9 @@ pub(super) async fn pubmed_literature_map(
         "fetch_errors": fetch_errors,
         "vector_writes_enabled": vector_writes_enabled,
         "vector_statuses": vector_statuses,
+        "require_vector_complete": args.require_vector_complete,
+        "vector_complete": incomplete_vectors.is_empty(),
+        "incomplete_vectors": incomplete_vectors,
         "validate_citations": args.validate_citations,
         "citation_validation": citation_validation.to_json(),
         "manifest": manifest_path,
@@ -621,7 +655,20 @@ pub(super) async fn pubmed_literature_map(
             "Resolve any review_case_id before vectorizing a possible duplicate."
         ]
     });
-    pretty_json(output)
+    let output = pretty_json(output)?;
+    if strict_vector_failure {
+        return Err(FunctionCallError::RespondToModel(format!(
+            "strict vector completeness failed for {} of {} PubMed records; diagnostics were saved to {}",
+            incomplete_vectors.len(),
+            search.records.len(),
+            committed.provenance.display(),
+        )));
+    }
+    Ok(output)
+}
+
+fn vector_status_is_complete(status: &str) -> bool {
+    matches!(status, "complete" | "already_vectorized")
 }
 
 #[derive(Debug, Clone)]
@@ -1886,5 +1933,23 @@ mod tests {
         assert_eq!(validation.authors_match, Some(true));
         assert_eq!(validation.year_match, Some(false));
         assert!(validation.warning.contains("year mismatch"));
+    }
+
+    #[test]
+    fn strict_vector_completeness_accepts_only_terminal_success_states() {
+        assert!(vector_status_is_complete("complete"));
+        assert!(vector_status_is_complete("already_vectorized"));
+        for status in [
+            "vector_write_disabled",
+            "pending",
+            "embedding",
+            "upserting",
+            "verifying",
+            "possible_duplicate",
+            "blocked_conflict",
+            "failed",
+        ] {
+            assert!(!vector_status_is_complete(status), "{status}");
+        }
     }
 }

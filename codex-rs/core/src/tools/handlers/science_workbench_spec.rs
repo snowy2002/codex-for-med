@@ -181,6 +181,13 @@ pub fn create_pubmed_literature_map_tool() -> ToolSpec {
                     .to_string(),
             )),
         ),
+        (
+            "require_vector_complete".to_string(),
+            JsonSchema::boolean(Some(
+                "Whether to fail the tool call unless every returned PubMed record is fully represented in Qdrant. Defaults to false; diagnostics and provenance are still written on strict failure."
+                    .to_string(),
+            )),
+        ),
     ]);
 
     ToolSpec::Function(ResponsesApiTool {
