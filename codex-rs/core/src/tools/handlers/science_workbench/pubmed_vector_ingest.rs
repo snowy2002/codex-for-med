@@ -15,7 +15,6 @@ use std::time::Instant;
 use super::EMBEDDING_API_KEY;
 use super::EMBEDDING_MODEL;
 use super::EMBEDDING_URL;
-use super::QDRANT_API_KEY;
 use super::QDRANT_COLLECTION;
 use super::QDRANT_URL;
 use super::literature_registry::Literature;
@@ -97,7 +96,7 @@ impl PubmedVectorConfig {
             collection,
             qdrant_api_key: env_non_empty("CODEX_MED_VECTOR_QDRANT_API_KEY")
                 .or_else(|| env_non_empty("QDRANT_API_KEY"))
-                .unwrap_or_else(|| QDRANT_API_KEY.into()),
+                .unwrap_or_default(),
             embedding_url: env_non_empty("CODEX_MED_EMBEDDING_URL")
                 .unwrap_or_else(|| EMBEDDING_URL.into()),
             embedding_model: env_non_empty("CODEX_MED_EMBEDDING_MODEL")

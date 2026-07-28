@@ -4,6 +4,8 @@ use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolPayload;
 use crate::tools::context::boxed_tool_output;
 use crate::tools::handlers::parse_arguments;
+use crate::tools::handlers::qdrant_config::DEFAULT_QDRANT_COLLECTION;
+use crate::tools::handlers::qdrant_config::DEFAULT_QDRANT_URL;
 use crate::tools::handlers::vector_knowledge_spec::SEARCH_VECTOR_KNOWLEDGE_TOOL_NAME;
 use crate::tools::handlers::vector_knowledge_spec::create_search_vector_knowledge_tool;
 use crate::tools::registry::CoreToolRuntime;
@@ -22,8 +24,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 use url::Url;
 
-const DEFAULT_QDRANT_URL: &str = "http://150.5.166.194/vector";
-const DEFAULT_COLLECTION: &str = "medical_knowledge_qwen3_4b";
+const DEFAULT_COLLECTION: &str = DEFAULT_QDRANT_COLLECTION;
 const DEFAULT_TOP_K: usize = 8;
 const MAX_TOP_K: usize = 30;
 const HTTP_TIMEOUT_SECONDS: u64 = 60;
@@ -38,9 +39,6 @@ const QDRANT_API_KEY_HEADER: HeaderName = HeaderName::from_static("api-key");
 //
 // Rotating the tokens: edit the constants here, rebuild `codex`, ship the new
 // binary. Alternatively export the matching env vars on the client host.
-const BAKED_QDRANT_API_KEY: &str =
-    "e7d682ca3d11a77ac70a747018439892c137ee556aeec86f7bf4f5da40caf32a";
-
 const DEFAULT_EMBEDDING_URL: &str = "http://gw-bzokqkvr2cblz8ok6y.cn-wulanchabu-acdr-1.pai-eas.aliyuncs.com/api/predict/qwen3_embedding_4b/v1/embeddings";
 const DEFAULT_EMBEDDING_MODEL: &str = "/model_dir/Qwen3-Embedding-4B";
 const BAKED_EMBEDDING_API_KEY: &str = "OTE4MDhiNDE1YmIwYTEzNjE1ZTA2YjFhMTVhNmU3MzczNGVlMTkzZA==";
@@ -534,7 +532,7 @@ async fn qdrant_search(
     headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
     let api_key = env_non_empty("CODEX_MED_VECTOR_QDRANT_API_KEY")
         .or_else(|| env_non_empty("QDRANT_API_KEY"))
-        .unwrap_or_else(|| BAKED_QDRANT_API_KEY.to_string());
+        .unwrap_or_default();
     if !api_key.is_empty() {
         let value = HeaderValue::from_str(&api_key).map_err(|err| {
             FunctionCallError::RespondToModel(format!("invalid Qdrant API key header: {err}"))

@@ -21,6 +21,7 @@ pub(crate) mod multi_agents_spec;
 pub(crate) mod multi_agents_v2;
 mod plan;
 pub(crate) mod plan_spec;
+mod qdrant_config;
 mod request_permissions;
 mod request_plugin_install;
 pub(crate) mod request_plugin_install_spec;

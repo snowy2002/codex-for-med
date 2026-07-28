@@ -4,6 +4,9 @@ use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolPayload;
 use crate::tools::context::boxed_tool_output;
 use crate::tools::handlers::parse_arguments;
+use crate::tools::handlers::qdrant_config::DEFAULT_QDRANT_COLLECTION;
+use crate::tools::handlers::qdrant_config::DEFAULT_QDRANT_URL;
+use crate::tools::handlers::qdrant_config::QdrantRuntimeConfig;
 use crate::tools::handlers::science_workbench_spec::DESCRIBE_MED_DATABASE_TOOL_NAME;
 use crate::tools::handlers::science_workbench_spec::LIST_MED_KNOWLEDGE_COLLECTIONS_TOOL_NAME;
 use crate::tools::handlers::science_workbench_spec::LITERATURE_MAP_TOOL_NAME;
@@ -90,9 +93,8 @@ const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const SQL_API_URL: &str = "http://150.5.166.194/sql";
 const SQL_API_TOKEN: &str = "bc62ea6d3039564fd945291fd29534e1b7e08c6cfe19d239dc28bbed69a8962c";
 
-const QDRANT_URL: &str = "http://150.5.166.194/vector";
-const QDRANT_COLLECTION: &str = "medical_knowledge_qwen3_4b";
-const QDRANT_API_KEY: &str = "e7d682ca3d11a77ac70a747018439892c137ee556aeec86f7bf4f5da40caf32a";
+const QDRANT_URL: &str = DEFAULT_QDRANT_URL;
+const QDRANT_COLLECTION: &str = DEFAULT_QDRANT_COLLECTION;
 
 const EMBEDDING_URL: &str = "http://gw-bzokqkvr2cblz8ok6y.cn-wulanchabu-acdr-1.pai-eas.aliyuncs.com/api/predict/qwen3_embedding_4b/v1/embeddings";
 const EMBEDDING_MODEL: &str = "/model_dir/Qwen3-Embedding-4B";
@@ -378,15 +380,16 @@ fn default_literature_top_k() -> usize {
 async fn list_med_knowledge_collections(
     client: &reqwest::Client,
 ) -> Result<String, FunctionCallError> {
-    let vector = qdrant_collection_info(client).await?;
+    let qdrant = QdrantRuntimeConfig::from_environment(None, None)?;
+    let vector = qdrant_collection_info(client, &qdrant).await?;
     let sql = sql_schema(client).await?;
     let output = json!({
         "backends": [
             {
                 "kind": "vector",
                 "provider": "qdrant",
-                "url": QDRANT_URL,
-                "collection": QDRANT_COLLECTION,
+                "url": qdrant.base_url(),
+                "collection": qdrant.collection(),
                 "status": vector.pointer("/result/status").cloned().unwrap_or(Value::Null),
                 "points_count": vector.pointer("/result/points_count").cloned().unwrap_or(Value::Null),
                 "indexed_vectors_count": vector.pointer("/result/indexed_vectors_count").cloned().unwrap_or(Value::Null),
@@ -415,6 +418,7 @@ async fn describe_med_database(
     client: &reqwest::Client,
     args: DescribeMedDatabaseArgs,
 ) -> Result<String, FunctionCallError> {
+    let qdrant = QdrantRuntimeConfig::from_environment(None, None)?;
     let mut output = json!({
         "summary": {
             "sql": "Structured antibody metadata and sequence/assay fields.",
@@ -433,12 +437,12 @@ async fn describe_med_database(
     }
 
     if args.include_vector_details {
-        let info = qdrant_collection_info(client).await?;
-        let counts = vector_category_counts(client).await?;
+        let info = qdrant_collection_info(client, &qdrant).await?;
+        let counts = vector_category_counts(client, &qdrant).await?;
         output["vector_database"] = json!({
             "provider": "qdrant",
-            "url": QDRANT_URL,
-            "collection": QDRANT_COLLECTION,
+            "url": qdrant.base_url(),
+            "collection": qdrant.collection(),
             "collection_info": info.get("result").cloned().unwrap_or(info),
             "observed_counts": counts,
             "payload_fields": [
@@ -474,6 +478,7 @@ async fn literature_map(
             "topic must not be empty".to_string(),
         ));
     }
+    let qdrant = QdrantRuntimeConfig::from_environment(None, None)?;
     let started_at = chrono::Utc::now();
     let project_id = args
         .project_id
@@ -493,7 +498,7 @@ async fn literature_map(
     let recall_k = (top_k * LITERATURE_RECALL_MULTIPLIER)
         .min(LITERATURE_MAX_RECALL)
         .max(top_k);
-    let recall_points = qdrant_search(client, &embedding, recall_k, category).await?;
+    let recall_points = qdrant_search(client, &qdrant, &embedding, recall_k, category).await?;
 
     // Rerank the recall pool with the shared Qwen3 reranker so evidence ordering
     // matches search_vector_knowledge, then aggregate chunks of the same document.
@@ -512,27 +517,14 @@ async fn literature_map(
     let baseline_initialization = if std::env::var("CODEX_MED_INITIALIZE_LITERATURE_BASELINE")
         .is_ok_and(|value| value == "1")
     {
-        let qdrant_url = std::env::var("CODEX_MED_VECTOR_QDRANT_URL")
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| QDRANT_URL.to_string());
-        let collection = std::env::var("CODEX_MED_VECTOR_COLLECTION")
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| QDRANT_COLLECTION.to_string());
-        let api_key = std::env::var("CODEX_MED_VECTOR_QDRANT_API_KEY")
-            .ok()
-            .or_else(|| std::env::var("QDRANT_API_KEY").ok())
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| QDRANT_API_KEY.to_string());
         Some(
             initialize_qdrant_baseline(
                 client,
                 &registry,
                 cwd,
-                &qdrant_url,
-                &collection,
-                &api_key,
+                qdrant.base_url(),
+                qdrant.collection(),
+                qdrant.api_key().unwrap_or_default(),
                 &now_rfc3339,
             )
             .await
@@ -556,7 +548,7 @@ async fn literature_map(
             .then(|| row.paper_id.clone())
             .or_else(|| paper_id_from_source_uri(&row.source_uri));
         let source = (!row.document_id.trim().is_empty()).then(|| SourceRecord {
-            system: format!("qdrant:{QDRANT_COLLECTION}"),
+            system: format!("qdrant:{}", qdrant.collection()),
             key: row.document_id.clone(),
             match_method: "qdrant_document".to_string(),
         });
@@ -574,7 +566,7 @@ async fn literature_map(
                         },
                         "field_sources": {
                             "title": {
-                                "source": format!("qdrant:{QDRANT_COLLECTION}"),
+                                "source": format!("qdrant:{}", qdrant.collection()),
                                 "observed_at": now_rfc3339,
                             }
                         }
@@ -692,8 +684,8 @@ async fn literature_map(
         "backends": {
             "vector": {
                 "provider": "qdrant",
-                "url": QDRANT_URL,
-                "collection": QDRANT_COLLECTION,
+                "url": qdrant.base_url(),
+                "collection": qdrant.collection(),
                 "embedding_model": EMBEDDING_MODEL,
                 "reranker_model": RERANKER_MODEL
             }
@@ -820,30 +812,32 @@ async fn sql_schema(client: &reqwest::Client) -> Result<Value, FunctionCallError
     parse_http_json(response, "SQL schema").await
 }
 
-async fn qdrant_collection_info(client: &reqwest::Client) -> Result<Value, FunctionCallError> {
-    let url = format!(
-        "{}/collections/{}",
-        QDRANT_URL.trim_end_matches('/'),
-        QDRANT_COLLECTION
-    );
-    let response = client
-        .get(url)
-        .header("api-key", QDRANT_API_KEY)
+async fn qdrant_collection_info(
+    client: &reqwest::Client,
+    qdrant: &QdrantRuntimeConfig,
+) -> Result<Value, FunctionCallError> {
+    let response = qdrant
+        .authenticate(client.get(qdrant.collection_url("")))
         .send()
         .await
         .map_err(http_error("Qdrant collection request failed"))?;
     parse_http_json(response, "Qdrant collection").await
 }
 
-async fn vector_category_counts(client: &reqwest::Client) -> Result<Value, FunctionCallError> {
-    let total = qdrant_count(client, None).await?;
+async fn vector_category_counts(
+    client: &reqwest::Client,
+    qdrant: &QdrantRuntimeConfig,
+) -> Result<Value, FunctionCallError> {
+    let total = qdrant_count(client, qdrant, None).await?;
     let bio_literature = qdrant_count(
         client,
+        qdrant,
         Some(json!({"must": [{"key": "category", "match": {"value": "bio_literature"}}]})),
     )
     .await?;
     let ocr_repaired_markdown = qdrant_count(
         client,
+        qdrant,
         Some(
             json!({"must": [{"key": "source_type", "match": {"value": "ocr_repaired_markdown"}}]}),
         ),
@@ -869,20 +863,15 @@ async fn vector_category_counts(client: &reqwest::Client) -> Result<Value, Funct
 
 async fn qdrant_count(
     client: &reqwest::Client,
+    qdrant: &QdrantRuntimeConfig,
     filter: Option<Value>,
 ) -> Result<u64, FunctionCallError> {
-    let url = format!(
-        "{}/collections/{}/points/count",
-        QDRANT_URL.trim_end_matches('/'),
-        QDRANT_COLLECTION
-    );
     let mut body = json!({"exact": true});
     if let Some(filter) = filter {
         body["filter"] = filter;
     }
-    let response = client
-        .post(url)
-        .header("api-key", QDRANT_API_KEY)
+    let response = qdrant
+        .authenticate(client.post(qdrant.collection_url("/points/count")))
         .json(&body)
         .send()
         .await
@@ -928,15 +917,11 @@ async fn embed_query(client: &reqwest::Client, query: &str) -> Result<Vec<f64>, 
 
 async fn qdrant_search(
     client: &reqwest::Client,
+    qdrant: &QdrantRuntimeConfig,
     embedding: &[f64],
     limit: usize,
     category: &str,
 ) -> Result<Vec<Value>, FunctionCallError> {
-    let url = format!(
-        "{}/collections/{}/points/search",
-        QDRANT_URL.trim_end_matches('/'),
-        QDRANT_COLLECTION
-    );
     let body = json!({
         "vector": embedding,
         "limit": limit,
@@ -947,9 +932,8 @@ async fn qdrant_search(
             "must_not": [{"key": "is_deleted", "match": {"value": true}}]
         }
     });
-    let response = client
-        .post(url)
-        .header("api-key", QDRANT_API_KEY)
+    let response = qdrant
+        .authenticate(client.post(qdrant.collection_url("/points/search")))
         .json(&body)
         .send()
         .await
