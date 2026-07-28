@@ -207,8 +207,163 @@ async fn pending_vector_review_case(
 mod tests {
     use super::super::literature_registry::LiteratureInput;
     use super::super::literature_registry::RegistrationOutcome;
+    use super::super::pubmed_chunks::build_pubmed_chunks;
+    use super::super::qdrant_count;
     use super::*;
+    use crate::tools::handlers::qdrant_config::QdrantRuntimeConfig;
     use serde_json::json;
+
+    #[tokio::test]
+    #[ignore = "requires live embedding and a disposable Qdrant collection"]
+    async fn real_pubmed_vector_reconciliation_sandbox() {
+        let collection =
+            std::env::var("CODEX_MED_VECTOR_COLLECTION").expect("sandbox collection must be set");
+        assert!(
+            collection.starts_with("codex_med_it_"),
+            "refusing to run against a non-sandbox collection"
+        );
+        assert_eq!(
+            std::env::var("CODEX_MED_PUBMED_VECTOR_WRITES").as_deref(),
+            Ok("1"),
+            "sandbox vector writes must be enabled explicitly"
+        );
+        assert!(
+            std::env::var("CODEX_MED_VECTOR_QDRANT_API_KEY")
+                .is_ok_and(|value| !value.trim().is_empty()),
+            "Qdrant API key must be set"
+        );
+        assert!(
+            std::env::var("CODEX_MED_EMBEDDING_API_KEY")
+                .is_ok_and(|value| !value.trim().is_empty()),
+            "embedding API key must be set"
+        );
+
+        let temp = tempfile::tempdir().expect("temporary workspace");
+        let registry = LiteratureRegistry::open_workspace(temp.path())
+            .await
+            .expect("literature registry");
+        let RegistrationOutcome::Registered(registered) = registry
+            .register(
+                LiteratureInput {
+                    pmid: Some("99999991".to_string()),
+                    doi: Some("10.0000/codex-med-real-reconcile".to_string()),
+                    paper_id: Some("PMID:99999991".to_string()),
+                    title: Some("Codex Med real vector reconciliation sandbox".to_string()),
+                    abstract_text: Some(format!("{}。{}", "a".repeat(1_900), "b".repeat(1_900))),
+                    authors: vec!["Codex Med Integration Test".to_string()],
+                    journal: Some("Sandbox Journal".to_string()),
+                    publication_date: Some("2026".to_string()),
+                    metadata: json!({"source": "real_reconciliation_sandbox"}),
+                },
+                None,
+                "2026-07-28T00:00:00Z",
+            )
+            .await
+            .expect("register sandbox PubMed record")
+        else {
+            panic!("expected sandbox PubMed registration");
+        };
+        let literature = registry
+            .get(&registered.literature_id)
+            .await
+            .expect("read sandbox literature")
+            .expect("sandbox literature exists");
+        let chunks = build_pubmed_chunks(&literature);
+        assert!(
+            chunks.len() > 1,
+            "sandbox literature must produce multiple chunks"
+        );
+
+        let client = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .timeout(std::time::Duration::from_secs(90))
+            .build()
+            .expect("HTTP client");
+        let qdrant = QdrantRuntimeConfig::from_environment(None, None)
+            .expect("valid sandbox Qdrant configuration");
+        assert_eq!(
+            qdrant_count(&client, &qdrant, None)
+                .await
+                .expect("initial sandbox count"),
+            0,
+            "sandbox collection must start empty"
+        );
+        let args = || ReconcilePubmedVectorsArgs {
+            literature_ids: Some(vec![registered.literature_id.clone()]),
+            limit: 1,
+        };
+
+        let first: serde_json::Value = serde_json::from_str(
+            &reconcile_pubmed_vectors(&client, args(), temp.path())
+                .await
+                .expect("first real reconciliation"),
+        )
+        .expect("first reconciliation JSON");
+        assert_eq!(first["complete"], true);
+        assert_eq!(first["selected"], 1);
+        assert_eq!(first["statuses"]["complete"], 1);
+        assert_eq!(first["results"][0]["verified_points"], chunks.len());
+        assert_eq!(
+            qdrant_count(&client, &qdrant, None)
+                .await
+                .expect("count after first reconciliation"),
+            chunks.len() as u64
+        );
+
+        let delete_response = qdrant
+            .authenticate(client.post(format!(
+                "{}?wait=true",
+                qdrant.collection_url("/points/delete")
+            )))
+            .json(&json!({"points": [&chunks[0].point_id]}))
+            .send()
+            .await
+            .expect("delete one sandbox point");
+        assert!(
+            delete_response.status().is_success(),
+            "sandbox point deletion failed: {}",
+            delete_response.status()
+        );
+        assert_eq!(
+            qdrant_count(&client, &qdrant, None)
+                .await
+                .expect("count after simulated drift"),
+            chunks.len() as u64 - 1
+        );
+
+        let repaired: serde_json::Value = serde_json::from_str(
+            &reconcile_pubmed_vectors(&client, args(), temp.path())
+                .await
+                .expect("drift repair reconciliation"),
+        )
+        .expect("repair reconciliation JSON");
+        assert_eq!(repaired["complete"], true);
+        assert_eq!(repaired["statuses"]["complete"], 1);
+        assert_eq!(repaired["results"][0]["verified_points"], chunks.len());
+        assert_eq!(
+            qdrant_count(&client, &qdrant, None)
+                .await
+                .expect("count after drift repair"),
+            chunks.len() as u64,
+            "reconciliation did not restore the missing vector"
+        );
+
+        let repeated: serde_json::Value = serde_json::from_str(
+            &reconcile_pubmed_vectors(&client, args(), temp.path())
+                .await
+                .expect("repeated reconciliation"),
+        )
+        .expect("repeated reconciliation JSON");
+        assert_eq!(repeated["complete"], true);
+        assert_eq!(repeated["statuses"]["already_vectorized"], 1);
+        assert_eq!(
+            qdrant_count(&client, &qdrant, None)
+                .await
+                .expect("count after repeated reconciliation"),
+            chunks.len() as u64,
+            "repeated reconciliation duplicated vectors"
+        );
+    }
 
     #[tokio::test]
     async fn selects_all_pubmed_records_and_deduplicates_requested_ids() {
