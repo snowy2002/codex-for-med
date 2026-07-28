@@ -2,7 +2,7 @@
 // Unified entry point for the Codex CLI.
 
 import { spawn } from "node:child_process";
-import { existsSync, realpathSync } from "fs";
+import { existsSync, mkdirSync, realpathSync } from "fs";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import path from "path";
@@ -174,6 +174,7 @@ const configuredCodexMedHome = process.env.CODEX_MED_HOME;
 const codexMedHome = configuredCodexMedHome
   ? path.resolve(configuredCodexMedHome)
   : path.join(homedir(), ".codex-med");
+mkdirSync(codexMedHome, { recursive: true });
 env.CODEX_MED_HOME = codexMedHome;
 // The native CLI still reads CODEX_HOME internally. Keep that implementation
 // detail inside the Codex Med child process so it never shares the regular

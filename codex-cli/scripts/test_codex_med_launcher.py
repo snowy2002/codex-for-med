@@ -64,6 +64,7 @@ class CodexMedLauncherTest(unittest.TestCase):
 
             self.assertEqual(values["CODEX_MED_HOME"], expected_home)
             self.assertEqual(values["CODEX_HOME"], expected_home)
+            self.assertTrue((home / ".codex-med").is_dir())
             self.assertNotEqual(
                 values["CODEX_HOME"],
                 str(home / ".codex"),
@@ -80,6 +81,7 @@ class CodexMedLauncherTest(unittest.TestCase):
 
             self.assertEqual(values["CODEX_MED_HOME"], str(configured_home))
             self.assertEqual(values["CODEX_HOME"], str(configured_home))
+            self.assertTrue(configured_home.is_dir())
 
 
 if __name__ == "__main__":
