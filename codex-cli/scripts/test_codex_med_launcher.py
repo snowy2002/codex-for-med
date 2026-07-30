@@ -43,7 +43,7 @@ class CodexMedLauncherTest(unittest.TestCase):
 
             env = os.environ.copy()
             env["HOME"] = str(home)
-            env["CODEX_HOME"] = str(package_root / "regular-codex-home")
+            env["CODEX_HOME"] = str(home / "regular-codex-home")
             if codex_med_home is None:
                 env.pop("CODEX_MED_HOME", None)
             else:
@@ -56,21 +56,17 @@ class CodexMedLauncherTest(unittest.TestCase):
             )
             return dict(line.split("=", 1) for line in stdout.splitlines())
 
-    def test_default_home_is_independent_from_regular_codex(self) -> None:
+    def test_inherits_regular_codex_home(self) -> None:
         with tempfile.TemporaryDirectory(prefix="codex-med-home-") as temp_dir:
             home = Path(temp_dir)
             values = self.run_launcher(home=home)
-            expected_home = str(home / ".codex-med")
+            expected_home = str(home / "regular-codex-home")
 
-            self.assertEqual(values["CODEX_MED_HOME"], expected_home)
+            self.assertEqual(values["CODEX_MED_HOME"], "")
             self.assertEqual(values["CODEX_HOME"], expected_home)
-            self.assertTrue((home / ".codex-med").is_dir())
-            self.assertNotEqual(
-                values["CODEX_HOME"],
-                str(home / ".codex"),
-            )
+            self.assertFalse((home / ".codex-med").exists())
 
-    def test_explicit_codex_med_home_controls_native_codex_home(self) -> None:
+    def test_codex_med_home_does_not_override_regular_codex_home(self) -> None:
         with tempfile.TemporaryDirectory(prefix="codex-med-home-") as temp_dir:
             home = Path(temp_dir)
             configured_home = home / "isolated-medical-agent"
@@ -80,8 +76,11 @@ class CodexMedLauncherTest(unittest.TestCase):
             )
 
             self.assertEqual(values["CODEX_MED_HOME"], str(configured_home))
-            self.assertEqual(values["CODEX_HOME"], str(configured_home))
-            self.assertTrue(configured_home.is_dir())
+            self.assertEqual(
+                values["CODEX_HOME"],
+                str(home / "regular-codex-home"),
+            )
+            self.assertFalse(configured_home.exists())
 
 
 if __name__ == "__main__":

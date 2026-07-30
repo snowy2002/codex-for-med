@@ -2,9 +2,8 @@
 // Unified entry point for the Codex CLI.
 
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, realpathSync } from "fs";
+import { existsSync, realpathSync } from "fs";
 import { createRequire } from "node:module";
-import { homedir } from "node:os";
 import path from "path";
 import { fileURLToPath } from "url";
 
@@ -170,16 +169,6 @@ if (existsSync(pathDir)) {
 const updatedPath = getUpdatedPath(additionalDirs);
 
 const env = { ...process.env, PATH: updatedPath };
-const configuredCodexMedHome = process.env.CODEX_MED_HOME;
-const codexMedHome = configuredCodexMedHome
-  ? path.resolve(configuredCodexMedHome)
-  : path.join(homedir(), ".codex-med");
-mkdirSync(codexMedHome, { recursive: true });
-env.CODEX_MED_HOME = codexMedHome;
-// The native CLI still reads CODEX_HOME internally. Keep that implementation
-// detail inside the Codex Med child process so it never shares the regular
-// Codex home, even when the parent shell has CODEX_HOME configured.
-env.CODEX_HOME = codexMedHome;
 const packageManagerEnvVar =
   detectPackageManager() === "bun"
     ? "CODEX_MANAGED_BY_BUN"
