@@ -296,6 +296,13 @@ pub fn create_validate_citations_tool() -> ToolSpec {
                     ),
                 ),
             ),
+            (
+                "claimed_year".to_string(),
+                JsonSchema::integer(Some(
+                    "Optional publication year claimed for this DOI. It is compared with the Crossref issued year to disambiguate works with identical titles."
+                        .to_string(),
+                )),
+            ),
         ]),
         Some(vec!["doi".to_string()]),
         Some(false.into()),
@@ -311,7 +318,7 @@ pub fn create_validate_citations_tool() -> ToolSpec {
 
     ToolSpec::Function(ResponsesApiTool {
         name: VALIDATE_CITATIONS_TOOL_NAME.to_string(),
-        description: "Verify citations against the authoritative Crossref record by DOI. For each citation, resolves the DOI and reports whether it exists and whether the claimed title/authors match the real article — catching the common failure where a generated reference cites a DOI that resolves to a different paper. This is a deterministic metadata check; it does NOT judge whether the article supports the claim it is cited for."
+        description: "Verify citations against the authoritative Crossref record by DOI. For each citation, resolves the DOI and reports whether it exists and whether the claimed title, publication year, and supporting author metadata match the real article — catching the common failure where a generated reference cites a DOI that resolves to a different paper. This is a deterministic metadata check; it does NOT judge whether the article supports the claim it is cited for."
             .to_string(),
         strict: false,
         defer_loading: None,

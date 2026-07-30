@@ -17,6 +17,8 @@ pub(crate) struct CitationToCheck {
     pub(crate) claimed_title: Option<String>,
     #[serde(default)]
     pub(crate) claimed_authors: Vec<String>,
+    #[serde(default)]
+    pub(crate) claimed_year: Option<u64>,
 }
 pub(super) async fn validate_citations(
     args: ValidateCitationsArgs,
@@ -138,10 +140,18 @@ pub(crate) async fn validate_one_citation(
                 .all(|claimed| author_present(claimed, &actual_authors)),
         )
     };
+    let year_match = citation
+        .claimed_year
+        .zip(actual_year)
+        .map(|(claimed, actual)| claimed == actual);
 
-    // A checkable field that disagrees is a mismatch. Fields the caller did not
-    // supply (None) do not count against the citation.
-    let is_mismatch = title_match == Some(false) || authors_match == Some(false);
+    // DOI resolution establishes the record identity. A supplied title is the
+    // primary metadata consistency check and publication year disambiguates
+    // works with identical titles. Author names are supporting evidence because
+    // ordering, initials, transliteration, and group authorship vary between
+    // bibliographic providers. Fall back to authors only when neither title nor
+    // year was supplied.
+    let is_mismatch = citation_metadata_mismatch(title_match, year_match, authors_match);
 
     Ok(json!({
         "doi": doi,
@@ -150,9 +160,21 @@ pub(crate) async fn validate_one_citation(
         "resolved_authors": actual_authors,
         "resolved_year": actual_year,
         "title_match": title_match,
+        "year_match": year_match,
         "authors_match": authors_match,
     }))
 }
+
+fn citation_metadata_mismatch(
+    title_match: Option<bool>,
+    year_match: Option<bool>,
+    authors_match: Option<bool>,
+) -> bool {
+    title_match == Some(false)
+        || year_match == Some(false)
+        || (title_match.is_none() && year_match.is_none() && authors_match == Some(false))
+}
+
 /// Strip the many ways a DOI arrives (a `doi:` prefix, a resolver URL) down to
 /// the bare identifier, lowercased since DOIs are case-insensitive.
 fn normalize_doi(raw: &str) -> String {
@@ -216,14 +238,27 @@ fn normalize_for_compare(text: &str) -> String {
 /// name. Citation styles vary too much (initials vs full given names, ordering)
 /// for exact equality; the family name is the stable anchor.
 fn author_present(claimed: &str, actual: &[String]) -> bool {
-    let claimed_norm = normalize_for_compare(claimed);
-    if claimed_norm.is_empty() {
+    let claimed_family = claimed
+        .split_once(',')
+        .map_or(claimed, |(family, _given)| family);
+    let claimed_family_norm = normalize_for_compare(claimed_family);
+    let claimed_surname = if claimed.contains(',') {
+        claimed_family_norm.as_str()
+    } else {
+        claimed_family_norm
+            .rsplit(' ')
+            .next()
+            .unwrap_or(&claimed_family_norm)
+    };
+    if claimed_surname.is_empty() {
         return false;
     }
-    let claimed_surname = claimed_norm.rsplit(' ').next().unwrap_or(&claimed_norm);
     actual.iter().any(|name| {
         let name_norm = normalize_for_compare(name);
-        name_norm.split(' ').any(|part| part == claimed_surname)
+        name_norm == claimed_surname
+            || name_norm
+                .strip_suffix(claimed_surname)
+                .is_some_and(|given| given.ends_with(' '))
     })
 }
 
@@ -297,9 +332,40 @@ mod tests {
         // Surname anchors the match despite given-name style differences.
         assert!(author_present("Jinek", &actual));
         assert!(author_present("M Jinek", &actual));
+        assert!(author_present("Jinek, Martin", &actual));
         assert!(author_present("Jennifer Doudna", &actual));
         assert!(!author_present("Zhang", &actual));
         assert!(!author_present("", &actual));
+    }
+    #[test]
+    fn author_present_matches_pubmed_family_given_format() {
+        let actual = vec![
+            "Fernando P. Polack".to_string(),
+            "Stephen J. Thomas".to_string(),
+            "Nicholas Kitchin".to_string(),
+            "Gonzalo Perez Marc".to_string(),
+        ];
+
+        assert!(author_present("Polack, Fernando P", &actual));
+        assert!(author_present("Thomas, Stephen J", &actual));
+        assert!(author_present("Kitchin, Nicholas", &actual));
+        assert!(author_present("Perez Marc, Gonzalo", &actual));
+        assert!(!author_present("Other, Fernando P", &actual));
+    }
+    #[test]
+    fn citation_metadata_uses_title_and_year_before_authors() {
+        assert_eq!(
+            [
+                citation_metadata_mismatch(Some(true), Some(true), Some(false)),
+                citation_metadata_mismatch(Some(false), Some(true), Some(true)),
+                citation_metadata_mismatch(Some(true), Some(false), Some(true)),
+                citation_metadata_mismatch(None, Some(true), Some(false)),
+                citation_metadata_mismatch(None, None, Some(false)),
+                citation_metadata_mismatch(None, None, Some(true)),
+                citation_metadata_mismatch(None, None, None),
+            ],
+            [false, true, true, false, true, false, false]
+        );
     }
     #[test]
     fn crossref_authors_handles_given_family_and_collective() {
@@ -334,16 +400,19 @@ mod tests {
                             .to_string(),
                     ),
                     claimed_authors: vec!["Jinek".to_string(), "Doudna".to_string()],
+                    claimed_year: Some(2012),
                 },
                 CitationToCheck {
                     doi: "10.1126/science.1225829".to_string(),
                     claimed_title: Some("A totally unrelated paper about protein folding".to_string()),
                     claimed_authors: vec![],
+                    claimed_year: Some(2012),
                 },
                 CitationToCheck {
                     doi: "10.9999/this-doi-does-not-exist-xyz".to_string(),
                     claimed_title: None,
                     claimed_authors: vec![],
+                    claimed_year: None,
                 },
             ],
         })

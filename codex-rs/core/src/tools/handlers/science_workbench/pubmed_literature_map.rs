@@ -1125,9 +1125,11 @@ async fn validate_pubmed_map_citations(
             // PubMed and Crossref author formatting differs, so use the first
             // few surnames as anchors instead of requiring long author lists.
             claimed_authors: record.authors.iter().take(3).cloned().collect(),
+            claimed_year: pubmed_year_from_date(&record.publication_date)
+                .and_then(|year| year.parse::<u64>().ok()),
         };
         let validation = match validate_one_citation(client, &citation).await {
-            Ok(verdict) => pubmed_citation_validation_from_crossref(record, &verdict),
+            Ok(verdict) => pubmed_citation_validation_from_crossref(&verdict),
             Err(err) => PubmedCitationValidation {
                 status: "validation_error".to_string(),
                 warning: err.to_string(),
@@ -1141,11 +1143,8 @@ async fn validate_pubmed_map_citations(
     summary
 }
 
-fn pubmed_citation_validation_from_crossref(
-    record: &PubmedMapRecord,
-    verdict: &Value,
-) -> PubmedCitationValidation {
-    let mut status = verdict
+fn pubmed_citation_validation_from_crossref(verdict: &Value) -> PubmedCitationValidation {
+    let status = verdict
         .get("status")
         .and_then(Value::as_str)
         .unwrap_or("validation_error")
@@ -1153,14 +1152,7 @@ fn pubmed_citation_validation_from_crossref(
     let title_match = verdict.get("title_match").and_then(Value::as_bool);
     let authors_match = verdict.get("authors_match").and_then(Value::as_bool);
     let resolved_year = verdict.get("resolved_year").and_then(Value::as_u64);
-    let year_match = pubmed_year_from_date(&record.publication_date)
-        .and_then(|year| year.parse::<u64>().ok())
-        .zip(resolved_year)
-        .map(|(pubmed_year, crossref_year)| pubmed_year == crossref_year);
-
-    if year_match == Some(false) && status == "verified" {
-        status = "mismatch".to_string();
-    }
+    let year_match = verdict.get("year_match").and_then(Value::as_bool);
 
     let warning = pubmed_citation_warning(&status, title_match, authors_match, year_match, verdict);
 
@@ -2002,44 +1994,15 @@ mod tests {
 
     #[test]
     fn converts_crossref_verdict_to_pubmed_citation_validation() {
-        let record = PubmedMapRecord {
-            rank: 1,
-            literature_id: "550e8400-e29b-41d4-a716-446655440000".to_string(),
-            review_case_id: None,
-            match_method: "strong_identifier".to_string(),
-            vector_status: "not_processed".to_string(),
-            expected_points: 0,
-            verified_points: 0,
-            existing_vector_dataset: None,
-            existing_vector_document_id: None,
-            vector_verification_method: "not_complete".to_string(),
-            vector_error: None,
-            pmid: "33301246".to_string(),
-            title: "Integrated stress response, aging, and disease".to_string(),
-            authors: vec!["Doe, Jane".to_string()],
-            journal: "Journal of Test Biology".to_string(),
-            publication_date: "2020 Dec".to_string(),
-            doi: "10.1000/test.2020.1".to_string(),
-            abstract_text: String::new(),
-            publication_types: Vec::new(),
-            mesh_terms: Vec::new(),
-            mesh_term_count: 0,
-            language: String::new(),
-            relations: Vec::new(),
-            fetch_error: None,
-            citation_validation: None,
-        };
-        let validation = pubmed_citation_validation_from_crossref(
-            &record,
-            &json!({
-                "status": "verified",
-                "resolved_title": "Integrated stress response, aging, and disease",
-                "resolved_authors": ["Jane Doe"],
-                "resolved_year": 2021,
-                "title_match": true,
-                "authors_match": true
-            }),
-        );
+        let validation = pubmed_citation_validation_from_crossref(&json!({
+            "status": "mismatch",
+            "resolved_title": "Integrated stress response, aging, and disease",
+            "resolved_authors": ["Jane Doe"],
+            "resolved_year": 2021,
+            "title_match": true,
+            "year_match": false,
+            "authors_match": true
+        }));
 
         assert_eq!(validation.status, "mismatch");
         assert_eq!(validation.title_match, Some(true));
