@@ -19,9 +19,14 @@ from typing import Sequence
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BUILD_SCRIPT = REPO_ROOT / "codex-cli" / "scripts" / "build_npm_package.py"
 WORKFLOW_NAME = ".github/workflows/rust-release.yml"
-GITHUB_REPO = "openai/codex"
+GITHUB_REPO = "snowy2002/codex-for-med"
 BINARY_TARGETS = (
-    "x86_64-unknown-linux-gnu",
+    "x86_64-unknown-linux-musl",
+    "aarch64-unknown-linux-musl",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+    "aarch64-pc-windows-msvc",
 )
 
 _SPEC = importlib.util.spec_from_file_location("codex_build_npm_package", BUILD_SCRIPT)

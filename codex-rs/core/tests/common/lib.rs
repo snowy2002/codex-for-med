@@ -16,6 +16,7 @@ use codex_core::CodexThread;
 use codex_core::config::Config;
 use codex_core::config::ConfigBuilder;
 use codex_core::config::ConfigOverrides;
+use codex_features::Feature;
 use codex_utils_absolute_path::AbsolutePathBuf;
 pub use codex_utils_absolute_path::test_support::PathBufExt;
 pub use codex_utils_absolute_path::test_support::PathExt;
@@ -182,14 +183,21 @@ pub async fn load_default_config_for_test_with_cloud_requirements(
     codex_home: &TempDir,
     cloud_requirements: CloudRequirementsLoader,
 ) -> Config {
-    ConfigBuilder::default()
+    let mut config = ConfigBuilder::default()
         .loader_overrides(LoaderOverrides::without_managed_config_for_tests())
         .codex_home(codex_home.path().to_path_buf())
         .harness_overrides(default_test_overrides())
         .cloud_requirements(cloud_requirements)
         .build()
         .await
-        .expect("defaults for test should always succeed")
+        .expect("defaults for test should always succeed");
+    // Keep generic tests hermetic. Apps-specific tests explicitly enable this feature and provide
+    // an MCP mock endpoint.
+    config
+        .features
+        .disable(Feature::Apps)
+        .expect("test config should allow feature update");
+    config
 }
 
 pub fn managed_network_requirements_loader() -> CloudRequirementsLoader {

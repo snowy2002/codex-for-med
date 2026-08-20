@@ -10,8 +10,8 @@ use tokio::process::ChildStdin;
 use tokio::process::ChildStdout;
 
 use anyhow::Context;
+use codex_login::default_client::get_codex_user_agent;
 use codex_mcp_server::CodexToolCallParam;
-use codex_terminal_detection::user_agent;
 
 use pretty_assertions::assert_eq;
 use rmcp::model::CallToolRequestParams;
@@ -149,16 +149,8 @@ impl McpProcess {
         .await?;
 
         let initialized = self.read_jsonrpc_message().await?;
-        let os_info = os_info::get();
         let build_version = env!("CARGO_PKG_VERSION");
-        let originator = codex_login::default_client::originator().value;
-        let user_agent = format!(
-            "{originator}/{build_version} ({} {}; {}) {} (elicitation test; 0.0.0)",
-            os_info.os_type(),
-            os_info.version(),
-            os_info.architecture().unwrap_or("unknown"),
-            user_agent()
-        );
+        let user_agent = format!("{} (elicitation test; 0.0.0)", get_codex_user_agent());
         let JsonRpcMessage::Response(JsonRpcResponse {
             jsonrpc,
             id,
@@ -180,7 +172,7 @@ impl McpProcess {
                 "serverInfo": {
                     "name": "codex-mcp-server",
                     "title": "Codex",
-                    "version": "0.0.0",
+                    "version": build_version,
                     "user_agent": user_agent
                 },
                 "protocolVersion": ProtocolVersion::V_2025_03_26

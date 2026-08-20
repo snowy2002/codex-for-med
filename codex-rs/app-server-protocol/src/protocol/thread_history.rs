@@ -617,7 +617,7 @@ impl ThreadHistoryBuilder {
             receiver_thread_ids: Vec::new(),
             prompt: Some(payload.prompt.clone()),
             model: Some(payload.model.clone()),
-            reasoning_effort: Some(payload.reasoning_effort),
+            reasoning_effort: Some(payload.reasoning_effort.clone()),
             agents_states: HashMap::new(),
         };
         self.upsert_item_in_current_turn(item);
@@ -652,7 +652,7 @@ impl ThreadHistoryBuilder {
             receiver_thread_ids,
             prompt: Some(payload.prompt.clone()),
             model: Some(payload.model.clone()),
-            reasoning_effort: Some(payload.reasoning_effort),
+            reasoning_effort: Some(payload.reasoning_effort.clone()),
             agents_states,
         });
     }

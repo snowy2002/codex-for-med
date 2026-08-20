@@ -1,5 +1,6 @@
 pub(crate) mod cache;
 pub mod collaboration_mode_presets;
+pub mod compatibility;
 pub(crate) mod config;
 pub mod manager;
 pub mod model_info;
@@ -15,12 +16,7 @@ pub fn bundled_models_response()
     serde_json::from_str(include_str!("../models.json"))
 }
 
-/// Convert the client version string to a whole version string (e.g. "1.2.3-alpha.4" -> "1.2.3").
+/// Return the audited official Codex version used for model-catalog capability negotiation.
 pub fn client_version_to_whole() -> String {
-    format!(
-        "{}.{}.{}",
-        env!("CARGO_PKG_VERSION_MAJOR"),
-        env!("CARGO_PKG_VERSION_MINOR"),
-        env!("CARGO_PKG_VERSION_PATCH")
-    )
+    codex_build_info::upstream_protocol_client_version().to_string()
 }

@@ -42,12 +42,17 @@ async fn test_config_with_cli_overrides(
     cli_overrides: Vec<(String, TomlValue)>,
 ) -> (TempDir, Config) {
     let home = TempDir::new().expect("create temp dir");
-    let config = ConfigBuilder::without_managed_config_for_tests()
+    let mut config = ConfigBuilder::without_managed_config_for_tests()
         .codex_home(home.path().to_path_buf())
         .cli_overrides(cli_overrides)
         .build()
         .await
         .expect("load default test config");
+    config
+        .features
+        .disable(Feature::Apps)
+        .expect("disable Apps for hermetic agent control tests");
+    config.model_provider.supports_websockets = false;
     (home, config)
 }
 

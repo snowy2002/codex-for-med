@@ -64,7 +64,7 @@ fn reasoning_efforts_from_preset(
     efforts
         .iter()
         .map(|preset| ReasoningEffortOption {
-            reasoning_effort: preset.effort,
+            reasoning_effort: preset.effort.clone(),
             description: preset.description.to_string(),
         })
         .collect()

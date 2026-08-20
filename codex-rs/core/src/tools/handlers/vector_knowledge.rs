@@ -173,10 +173,7 @@ async fn search_vector_knowledge(
         let reranker_url = resolve_reranker_url()?;
         let reranker_model = env_non_empty("CODEX_MED_RERANKER_MODEL")
             .unwrap_or_else(|| DEFAULT_RERANKER_MODEL.to_string());
-        let documents: Vec<String> = ordered_points
-            .iter()
-            .map(|point| extract_rerank_text(point))
-            .collect();
+        let documents: Vec<String> = ordered_points.iter().map(extract_rerank_text).collect();
         match rerank(&client, &reranker_url, &reranker_model, &query, &documents).await {
             Ok(ranks) => {
                 // ranks is [(index_in_ordered_points, relevance_score), ...]

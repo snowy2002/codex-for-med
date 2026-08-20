@@ -26,9 +26,44 @@ CODEX_PLATFORM_PACKAGES: dict[str, dict[str, str]] = {
     "codex-linux-x64": {
         "npm_name": "@gair/codex-med-linux-x64",
         "npm_tag": "linux-x64",
-        "target_triple": "x86_64-unknown-linux-gnu",
+        "target_triple": "x86_64-unknown-linux-musl",
         "os": "linux",
         "cpu": "x64",
+    },
+    "codex-linux-arm64": {
+        "npm_name": "@gair/codex-med-linux-arm64",
+        "npm_tag": "linux-arm64",
+        "target_triple": "aarch64-unknown-linux-musl",
+        "os": "linux",
+        "cpu": "arm64",
+    },
+    "codex-darwin-x64": {
+        "npm_name": "@gair/codex-med-darwin-x64",
+        "npm_tag": "darwin-x64",
+        "target_triple": "x86_64-apple-darwin",
+        "os": "darwin",
+        "cpu": "x64",
+    },
+    "codex-darwin-arm64": {
+        "npm_name": "@gair/codex-med-darwin-arm64",
+        "npm_tag": "darwin-arm64",
+        "target_triple": "aarch64-apple-darwin",
+        "os": "darwin",
+        "cpu": "arm64",
+    },
+    "codex-win32-x64": {
+        "npm_name": "@gair/codex-med-win32-x64",
+        "npm_tag": "win32-x64",
+        "target_triple": "x86_64-pc-windows-msvc",
+        "os": "win32",
+        "cpu": "x64",
+    },
+    "codex-win32-arm64": {
+        "npm_name": "@gair/codex-med-win32-arm64",
+        "npm_tag": "win32-arm64",
+        "target_triple": "aarch64-pc-windows-msvc",
+        "os": "win32",
+        "cpu": "arm64",
     },
 }
 
@@ -39,6 +74,11 @@ PACKAGE_EXPANSIONS: dict[str, list[str]] = {
 PACKAGE_NATIVE_COMPONENTS: dict[str, list[str]] = {
     "codex": [],
     "codex-linux-x64": [CODEX_PACKAGE_COMPONENT],
+    "codex-linux-arm64": [CODEX_PACKAGE_COMPONENT],
+    "codex-darwin-x64": [CODEX_PACKAGE_COMPONENT],
+    "codex-darwin-arm64": [CODEX_PACKAGE_COMPONENT],
+    "codex-win32-x64": [CODEX_PACKAGE_COMPONENT],
+    "codex-win32-arm64": [CODEX_PACKAGE_COMPONENT],
     "codex-responses-api-proxy": ["codex-responses-api-proxy"],
     "codex-sdk": [],
 }

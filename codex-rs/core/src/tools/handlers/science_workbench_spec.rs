@@ -17,7 +17,7 @@ pub fn create_list_med_knowledge_collections_tool() -> ToolSpec {
             .to_string(),
         strict: false,
         defer_loading: None,
-        parameters: JsonSchema::object(BTreeMap::new(), None, Some(false.into())),
+        parameters: JsonSchema::object(BTreeMap::new(), /*required*/ None, Some(false.into())),
         output_schema: None,
     })
 }
@@ -45,7 +45,7 @@ pub fn create_describe_med_database_tool() -> ToolSpec {
             .to_string(),
         strict: false,
         defer_loading: None,
-        parameters: JsonSchema::object(properties, None, Some(false.into())),
+        parameters: JsonSchema::object(properties, /*required*/ None, Some(false.into())),
         output_schema: None,
     })
 }
@@ -270,7 +270,7 @@ pub fn create_reconcile_pubmed_vectors_tool() -> ToolSpec {
         (
             "literature_ids".to_string(),
             JsonSchema::array(
-                JsonSchema::string(None),
+                JsonSchema::string(/*description*/ None),
                 Some(
                     "Optional literature IDs to reconcile. When omitted, scans PubMed records from the workspace registry in stable update order."
                         .to_string(),
@@ -290,7 +290,7 @@ pub fn create_reconcile_pubmed_vectors_tool() -> ToolSpec {
             .to_string(),
         strict: false,
         defer_loading: None,
-        parameters: JsonSchema::object(properties, None, Some(false.into())),
+        parameters: JsonSchema::object(properties, /*required*/ None, Some(false.into())),
         output_schema: None,
     })
 }

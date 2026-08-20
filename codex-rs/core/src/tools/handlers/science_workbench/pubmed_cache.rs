@@ -89,7 +89,7 @@ mod tests {
     fn caches_and_force_refresh_bypasses_entries() {
         let temp = tempfile::tempdir().expect("temp dir");
         let query = [("db", "pubmed".to_string()), ("id", "123".to_string())];
-        let cache = PubmedCache::new(temp.path(), false);
+        let cache = PubmedCache::new(temp.path(), /*force_refresh*/ false);
         cache
             .put("https://example.invalid/efetch", &query, "record")
             .expect("cache put");
@@ -98,7 +98,7 @@ mod tests {
             Some("record".to_string())
         );
         assert!(
-            PubmedCache::new(temp.path(), true)
+            PubmedCache::new(temp.path(), /*force_refresh*/ true)
                 .get("https://example.invalid/efetch", &query)
                 .is_none()
         );

@@ -131,11 +131,11 @@ pub fn is_first_party_chat_originator(originator_value: &str) -> bool {
 }
 
 pub fn get_codex_user_agent() -> String {
-    let build_version = env!("CARGO_PKG_VERSION");
+    let protocol_client_version = codex_build_info::upstream_protocol_client_version();
     let os_info = os_info::get();
     let originator = originator();
     let prefix = format!(
-        "{}/{build_version} ({} {}; {}) {}",
+        "{}/{protocol_client_version} ({} {}; {}) {}",
         originator.value.as_str(),
         os_info.os_type(),
         os_info.version(),

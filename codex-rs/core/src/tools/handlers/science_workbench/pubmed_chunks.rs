@@ -226,7 +226,7 @@ mod tests {
     fn collapses_newline_runs_and_uses_overlap() {
         assert_eq!(normalize_text("a\r\n\r\n\r\nb"), "a\n\nb");
         let text = format!("{}。{}", "a".repeat(1_100), "b".repeat(1_100));
-        let chunks = chunk_text(&text, 2_000, 200);
+        let chunks = chunk_text(&text, /*max_chars*/ 2_000, /*overlap_chars*/ 200);
         assert_eq!(chunks.len(), 2);
         assert!(chunks[0].ends_with('。'));
         assert!(chunks[1].starts_with(&"a".repeat(199)));

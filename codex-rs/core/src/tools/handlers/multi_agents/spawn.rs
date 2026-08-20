@@ -76,7 +76,7 @@ async fn handle_spawn_agent(
                 sender_thread_id: session.conversation_id,
                 prompt: prompt.clone(),
                 model: args.model.clone().unwrap_or_default(),
-                reasoning_effort: args.reasoning_effort.unwrap_or_default(),
+                reasoning_effort: args.reasoning_effort.clone().unwrap_or_default(),
             }
             .into(),
         )
@@ -87,14 +87,18 @@ async fn handle_spawn_agent(
         config.service_tier = Some(service_tier.clone());
     }
     if args.fork_context {
-        reject_full_fork_spawn_overrides(role_name, args.model.as_deref(), args.reasoning_effort)?;
+        reject_full_fork_spawn_overrides(
+            role_name,
+            args.model.as_deref(),
+            args.reasoning_effort.as_ref(),
+        )?;
     } else {
         apply_requested_spawn_agent_model_overrides(
             &session,
             turn.as_ref(),
             &mut config,
             args.model.as_deref(),
-            args.reasoning_effort,
+            args.reasoning_effort.clone(),
         )
         .await?;
         apply_role_to_config(&mut config, role_name)
@@ -167,8 +171,8 @@ async fn handle_spawn_agent(
         .unwrap_or_else(|| args.model.clone().unwrap_or_default());
     let effective_reasoning_effort = agent_snapshot
         .as_ref()
-        .and_then(|snapshot| snapshot.reasoning_effort)
-        .unwrap_or(args.reasoning_effort.unwrap_or_default());
+        .and_then(|snapshot| snapshot.reasoning_effort.clone())
+        .unwrap_or_else(|| args.reasoning_effort.clone().unwrap_or_default());
     let nickname = new_agent_nickname.clone();
     session
         .send_event(

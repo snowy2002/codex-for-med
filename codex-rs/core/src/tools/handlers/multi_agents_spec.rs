@@ -749,12 +749,12 @@ fn spawn_agent_models_description(models: &[ModelPreset]) -> String {
     let model_descriptions = visible_models
         .into_iter()
         .map(|model| {
-            let default_reasoning_effort = model.default_reasoning_effort;
+            let default_reasoning_effort = &model.default_reasoning_effort;
             let efforts = model
                 .supported_reasoning_efforts
                 .iter()
                 .map(|preset| {
-                    let effort = preset.effort;
+                    let effort = &preset.effort;
                     if effort == default_reasoning_effort {
                         format!("{effort} (default)")
                     } else {

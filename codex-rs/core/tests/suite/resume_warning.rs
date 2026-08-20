@@ -39,7 +39,7 @@ fn resume_history(
         personality: None,
         collaboration_mode: None,
         realtime_active: None,
-        effort: config.model_reasoning_effort,
+        effort: config.model_reasoning_effort.clone(),
         summary: config
             .model_reasoning_summary
             .unwrap_or(ReasoningSummary::Auto),

@@ -2422,6 +2422,34 @@ async fn model_reasoning_selection_popup_snapshot() {
 }
 
 #[tokio::test]
+async fn model_reasoning_selection_popup_max_ultra_snapshot() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
+
+    set_chatgpt_auth(&mut chat);
+    chat.set_reasoning_effort(Some(ReasoningEffortConfig::Ultra));
+
+    let mut preset = get_available_model(&chat, "gpt-5.4");
+    preset.supported_reasoning_efforts.extend([
+        ReasoningEffortPreset {
+            effort: ReasoningEffortConfig::Max,
+            description: "Maximum reasoning depth for the hardest problems".to_string(),
+        },
+        ReasoningEffortPreset {
+            effort: ReasoningEffortConfig::Ultra,
+            description: "Maximum reasoning with automatic task delegation".to_string(),
+        },
+        ReasoningEffortPreset {
+            effort: ReasoningEffortConfig::Custom("adaptive".to_string()),
+            description: "A provider-defined future reasoning level".to_string(),
+        },
+    ]);
+    chat.open_reasoning_popup(preset);
+
+    let popup = render_bottom_popup(&chat, /*width*/ 80);
+    assert_chatwidget_snapshot!("model_reasoning_selection_popup_max_ultra", popup);
+}
+
+#[tokio::test]
 async fn model_reasoning_selection_popup_extra_high_warning_snapshot() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.2")).await;
 

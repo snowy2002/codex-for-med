@@ -242,13 +242,19 @@ fn resolve_mcp_oauth_credentials_store_mode(
 #[cfg(test)]
 pub(crate) async fn test_config() -> Config {
     let codex_home = tempfile::tempdir().expect("create temp dir");
-    Config::load_from_base_config_with_overrides(
+    let mut config = Config::load_from_base_config_with_overrides(
         ConfigToml::default(),
         ConfigOverrides::default(),
         AbsolutePathBuf::from_absolute_path(codex_home.path()).expect("temp dir should resolve"),
     )
     .await
-    .expect("load default test config")
+    .expect("load default test config");
+    config
+        .features
+        .disable(Feature::Apps)
+        .expect("disable Apps for hermetic tests");
+    config.model_provider.supports_websockets = false;
+    config
 }
 
 /// Application configuration loaded from disk and merged with overrides.

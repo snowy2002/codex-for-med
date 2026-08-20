@@ -17,6 +17,7 @@ pub fn write_mock_responses_config_toml(
     for (feature, enabled) in feature_flags {
         features.insert(*feature, *enabled);
     }
+    features.entry(Feature::Apps).or_insert(false);
     let feature_entries = features
         .into_iter()
         .map(|(feature, enabled)| {
@@ -67,6 +68,7 @@ approval_policy = "never"
 sandbox_mode = "read-only"
 compact_prompt = "{compact_prompt}"
 model_auto_compact_token_limit = {auto_compact_limit}
+mcp_oauth_credentials_store = "file"
 
 model_provider = "{model_provider_id}"
 {openai_base_url_line}

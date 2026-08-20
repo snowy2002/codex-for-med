@@ -232,7 +232,7 @@ mod tests {
                 Some(0.5),
             ),
         ];
-        let (deduped, total) = dedupe_points(ordered, 10);
+        let (deduped, total) = dedupe_points(ordered, /*top_k*/ 10);
         assert_eq!(total, 3);
         assert_eq!(deduped.len(), 2);
         assert_eq!(point_id_string(&deduped[0].point), "c1");
@@ -246,7 +246,7 @@ mod tests {
             (json!({"id": "c2", "payload": {"paper_id": "P2"}}), None),
             (json!({"id": "c3", "payload": {"paper_id": "P3"}}), None),
         ];
-        let (deduped, _) = dedupe_points(ordered, 2);
+        let (deduped, _) = dedupe_points(ordered, /*top_k*/ 2);
         assert_eq!(deduped.len(), 2);
     }
 }

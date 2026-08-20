@@ -9,6 +9,7 @@ use codex_login::ExternalAuth;
 use codex_login::ExternalAuthRefreshContext;
 use codex_login::ExternalAuthTokens;
 use codex_login::TokenData;
+use codex_protocol::error::CodexErr;
 use codex_protocol::openai_models::ModelsResponse;
 use pretty_assertions::assert_eq;
 use serde_json::json;
@@ -166,6 +167,45 @@ impl ModelsEndpointClient for TestModelsEndpoint {
             .pop_front()
             .unwrap_or_default();
         Ok((models, None))
+    }
+}
+
+#[derive(Debug)]
+struct FailingModelsEndpoint {
+    fetch_count: AtomicUsize,
+}
+
+impl FailingModelsEndpoint {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            fetch_count: AtomicUsize::new(0),
+        })
+    }
+
+    fn fetch_count(&self) -> usize {
+        self.fetch_count.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl ModelsEndpointClient for FailingModelsEndpoint {
+    fn has_command_auth(&self) -> bool {
+        false
+    }
+
+    async fn uses_codex_backend(&self) -> bool {
+        true
+    }
+
+    async fn list_models(
+        &self,
+        _client_version: &str,
+    ) -> CoreResult<(Vec<ModelInfo>, Option<String>)> {
+        self.fetch_count.fetch_add(1, Ordering::SeqCst);
+        Err(CodexErr::Stream(
+            "simulated model endpoint failure".to_string(),
+            /*retry_after*/ None,
+        ))
     }
 }
 
@@ -612,6 +652,152 @@ async fn refresh_available_models_refetches_when_version_mismatch() {
         2,
         "version mismatch should fetch models again"
     );
+}
+
+#[tokio::test]
+async fn online_refresh_falls_back_to_stale_cross_version_cache() {
+    let cached_models = vec![remote_model(
+        "last-known-good",
+        "Last Known Good",
+        /*priority*/ 1,
+    )];
+    let codex_home = tempdir().expect("temp dir");
+    let seed_manager = openai_manager_for_tests(
+        codex_home.path().to_path_buf(),
+        TestModelsEndpoint::new(vec![cached_models.clone()]),
+    );
+    seed_manager
+        .refresh_available_models(RefreshStrategy::Online)
+        .await
+        .expect("initial refresh succeeds");
+    seed_manager
+        .cache_manager
+        .mutate_cache_for_test(|cache| {
+            cache.fetched_at = Utc::now() - chrono::Duration::days(30);
+            cache.client_version = Some("0.1.5".to_string());
+        })
+        .await
+        .expect("cache mutation succeeds");
+
+    let failing_endpoint = FailingModelsEndpoint::new();
+    let fallback_manager =
+        openai_manager_for_tests(codex_home.path().to_path_buf(), failing_endpoint.clone());
+    fallback_manager
+        .refresh_available_models(RefreshStrategy::Online)
+        .await
+        .expect("last-known-good cache should absorb endpoint failure");
+
+    assert_eq!(fallback_manager.get_remote_models().await, cached_models);
+    assert_eq!(failing_endpoint.fetch_count(), 1);
+}
+
+#[tokio::test]
+async fn offline_refresh_uses_stale_cache_without_network() {
+    let cached_models = vec![remote_model("offline", "Offline", /*priority*/ 1)];
+    let codex_home = tempdir().expect("temp dir");
+    let seed_manager = openai_manager_for_tests(
+        codex_home.path().to_path_buf(),
+        TestModelsEndpoint::new(vec![cached_models.clone()]),
+    );
+    seed_manager
+        .refresh_available_models(RefreshStrategy::Online)
+        .await
+        .expect("initial refresh succeeds");
+    seed_manager
+        .cache_manager
+        .manipulate_cache_for_test(|fetched_at| {
+            *fetched_at = Utc::now() - chrono::Duration::days(30);
+        })
+        .await
+        .expect("cache manipulation succeeds");
+
+    let endpoint = TestModelsEndpoint::new(Vec::new());
+    let offline_manager =
+        openai_manager_for_tests(codex_home.path().to_path_buf(), endpoint.clone());
+    offline_manager
+        .refresh_available_models(RefreshStrategy::Offline)
+        .await
+        .expect("offline refresh succeeds");
+
+    assert_eq!(offline_manager.get_remote_models().await, cached_models);
+    assert_eq!(endpoint.fetch_count(), 0);
+}
+
+#[tokio::test]
+async fn offline_refresh_migrates_legacy_cache_without_schema_or_provider_fields() {
+    let cached_models = vec![remote_model(
+        "legacy-cache",
+        "Legacy Cache",
+        /*priority*/ 1,
+    )];
+    let codex_home = tempdir().expect("temp dir");
+    let seed_manager = openai_manager_for_tests(
+        codex_home.path().to_path_buf(),
+        TestModelsEndpoint::new(vec![cached_models.clone()]),
+    );
+    seed_manager
+        .refresh_available_models(RefreshStrategy::Online)
+        .await
+        .expect("initial refresh succeeds");
+
+    let cache_path = codex_home.path().join(MODEL_CACHE_FILE);
+    let mut legacy_cache: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&cache_path).expect("cache file should exist"))
+            .expect("cache should be valid JSON");
+    let cache_object = legacy_cache
+        .as_object_mut()
+        .expect("cache should be an object");
+    cache_object.remove("schema_version");
+    cache_object.remove("provider_identity");
+    std::fs::write(
+        &cache_path,
+        serde_json::to_vec_pretty(&legacy_cache).expect("legacy cache should serialize"),
+    )
+    .expect("legacy cache should be written");
+
+    let endpoint = TestModelsEndpoint::new(Vec::new());
+    let manager = openai_manager_for_tests(codex_home.path().to_path_buf(), endpoint.clone());
+    manager
+        .refresh_available_models(RefreshStrategy::Offline)
+        .await
+        .expect("legacy cache should remain usable during migration");
+
+    assert_eq!(manager.get_remote_models().await, cached_models);
+    assert_eq!(endpoint.fetch_count(), 0);
+}
+
+#[tokio::test]
+async fn last_known_good_cache_does_not_cross_provider_boundaries() {
+    let cached_models = vec![remote_model(
+        "provider-a",
+        "Provider A",
+        /*priority*/ 1,
+    )];
+    let codex_home = tempdir().expect("temp dir");
+    let seed_manager = openai_manager_for_tests(
+        codex_home.path().to_path_buf(),
+        TestModelsEndpoint::new(vec![cached_models]),
+    );
+    seed_manager
+        .refresh_available_models(RefreshStrategy::Online)
+        .await
+        .expect("initial refresh succeeds");
+    seed_manager
+        .cache_manager
+        .mutate_cache_for_test(|cache| {
+            cache.provider_identity = Some("different-provider".to_string());
+        })
+        .await
+        .expect("cache mutation succeeds");
+
+    let failing_endpoint = FailingModelsEndpoint::new();
+    let manager = openai_manager_for_tests(codex_home.path().to_path_buf(), failing_endpoint);
+    let err = manager
+        .refresh_available_models(RefreshStrategy::Online)
+        .await
+        .expect_err("a mismatched provider cache must not hide the endpoint failure");
+
+    assert!(err.to_string().contains("simulated model endpoint failure"));
 }
 
 #[tokio::test]

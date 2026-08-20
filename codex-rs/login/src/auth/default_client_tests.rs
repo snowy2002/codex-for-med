@@ -7,8 +7,10 @@ use pretty_assertions::assert_eq;
 fn test_get_codex_user_agent() {
     let user_agent = get_codex_user_agent();
     let originator = originator().value;
-    let prefix = format!("{originator}/");
+    let protocol_client_version = codex_build_info::upstream_protocol_client_version();
+    let prefix = format!("{originator}/{protocol_client_version} ");
     assert!(user_agent.starts_with(&prefix));
+    assert!(!user_agent.starts_with(&format!("{originator}/{} ", env!("CARGO_PKG_VERSION"))));
 }
 
 #[test]

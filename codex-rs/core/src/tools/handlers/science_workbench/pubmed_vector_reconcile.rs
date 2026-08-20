@@ -255,7 +255,7 @@ mod tests {
                     publication_date: Some("2026".to_string()),
                     metadata: json!({"source": "real_reconciliation_sandbox"}),
                 },
-                None,
+                /*source*/ None,
                 "2026-07-28T00:00:00Z",
             )
             .await
@@ -279,10 +279,12 @@ mod tests {
             .timeout(std::time::Duration::from_secs(90))
             .build()
             .expect("HTTP client");
-        let qdrant = QdrantRuntimeConfig::from_environment(None, None)
-            .expect("valid sandbox Qdrant configuration");
+        let qdrant = QdrantRuntimeConfig::from_environment(
+            /*url_override*/ None, /*collection_override*/ None,
+        )
+        .expect("valid sandbox Qdrant configuration");
         assert_eq!(
-            qdrant_count(&client, &qdrant, None)
+            qdrant_count(&client, &qdrant, /*filter*/ None)
                 .await
                 .expect("initial sandbox count"),
             0,
@@ -304,7 +306,7 @@ mod tests {
         assert_eq!(first["statuses"]["complete"], 1);
         assert_eq!(first["results"][0]["verified_points"], chunks.len());
         assert_eq!(
-            qdrant_count(&client, &qdrant, None)
+            qdrant_count(&client, &qdrant, /*filter*/ None)
                 .await
                 .expect("count after first reconciliation"),
             chunks.len() as u64
@@ -325,7 +327,7 @@ mod tests {
             delete_response.status()
         );
         assert_eq!(
-            qdrant_count(&client, &qdrant, None)
+            qdrant_count(&client, &qdrant, /*filter*/ None)
                 .await
                 .expect("count after simulated drift"),
             chunks.len() as u64 - 1
@@ -341,7 +343,7 @@ mod tests {
         assert_eq!(repaired["statuses"]["complete"], 1);
         assert_eq!(repaired["results"][0]["verified_points"], chunks.len());
         assert_eq!(
-            qdrant_count(&client, &qdrant, None)
+            qdrant_count(&client, &qdrant, /*filter*/ None)
                 .await
                 .expect("count after drift repair"),
             chunks.len() as u64,
@@ -357,7 +359,7 @@ mod tests {
         assert_eq!(repeated["complete"], true);
         assert_eq!(repeated["statuses"]["already_vectorized"], 1);
         assert_eq!(
-            qdrant_count(&client, &qdrant, None)
+            qdrant_count(&client, &qdrant, /*filter*/ None)
                 .await
                 .expect("count after repeated reconciliation"),
             chunks.len() as u64,
@@ -379,7 +381,7 @@ mod tests {
                     metadata: json!({}),
                     ..Default::default()
                 },
-                None,
+                /*source*/ None,
                 "2026-01-01T00:00:00Z",
             )
             .await
@@ -394,20 +396,21 @@ mod tests {
                     metadata: json!({}),
                     ..Default::default()
                 },
-                None,
+                /*source*/ None,
                 "2026-01-01T00:00:00Z",
             )
             .await
             .expect("register non-PubMed");
 
-        let selected = select_pubmed_literatures(&registry, None, 100)
-            .await
-            .expect("select all");
+        let selected =
+            select_pubmed_literatures(&registry, /*requested_ids*/ None, /*limit*/ 100)
+                .await
+                .expect("select all");
         assert_eq!(selected.len(), 1);
         assert_eq!(selected[0].literature_id, pubmed.literature_id);
 
         let requested = vec![pubmed.literature_id.clone(), pubmed.literature_id.clone()];
-        let selected = select_pubmed_literatures(&registry, Some(&requested), 100)
+        let selected = select_pubmed_literatures(&registry, Some(&requested), /*limit*/ 100)
             .await
             .expect("select requested");
         assert_eq!(selected.len(), 1);

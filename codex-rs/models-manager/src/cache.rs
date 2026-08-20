@@ -5,11 +5,15 @@ use serde::Deserialize;
 use serde::Serialize;
 use std::io;
 use std::io::ErrorKind;
+use std::io::Write;
 use std::path::PathBuf;
 use std::time::Duration;
+use tempfile::NamedTempFile;
 use tokio::fs;
 use tracing::error;
 use tracing::info;
+
+const MODELS_CACHE_SCHEMA_VERSION: u32 = 1;
 
 /// Manages loading and saving of models cache to disk.
 #[derive(Debug)]
@@ -28,7 +32,11 @@ impl ModelsCacheManager {
     }
 
     /// Attempt to load a fresh cache entry. Returns `None` if the cache doesn't exist or is stale.
-    pub(crate) async fn load_fresh(&self, expected_version: &str) -> Option<ModelsCache> {
+    pub(crate) async fn load_fresh(
+        &self,
+        expected_version: &str,
+        expected_provider: &str,
+    ) -> Option<ModelsCache> {
         info!(
                 cache_path = %self.cache_path.display(),
                 expected_version,
@@ -41,6 +49,24 @@ impl ModelsCacheManager {
                 return None;
             }
         };
+        if !cache.is_schema_compatible() {
+            info!(
+                cache_path = %self.cache_path.display(),
+                cached_schema_version = cache.schema_version,
+                supported_schema_version = MODELS_CACHE_SCHEMA_VERSION,
+                "models cache: incompatible cache schema"
+            );
+            return None;
+        }
+        if !cache.matches_provider(expected_provider) {
+            info!(
+                cache_path = %self.cache_path.display(),
+                expected_provider,
+                cached_provider = ?cache.provider_identity,
+                "models cache: provider identity mismatch"
+            );
+            return None;
+        }
         info!(
             cache_path = %self.cache_path.display(),
             cached_version = ?cache.client_version,
@@ -73,17 +99,59 @@ impl ModelsCacheManager {
         Some(cache)
     }
 
+    /// Load the last compatible catalog regardless of age or client version.
+    ///
+    /// This is used only when the network is unavailable (or in explicit offline mode), so an
+    /// older but decodable catalog can keep the client usable without suppressing normal refreshes.
+    pub(crate) async fn load_last_known_good(
+        &self,
+        expected_provider: &str,
+    ) -> Option<ModelsCache> {
+        let cache = match self.load().await {
+            Ok(cache) => cache?,
+            Err(err) => {
+                error!("failed to load last-known-good models cache: {err}");
+                return None;
+            }
+        };
+        if !cache.is_schema_compatible()
+            || !cache.matches_provider(expected_provider)
+            || cache.models.is_empty()
+        {
+            info!(
+                cache_path = %self.cache_path.display(),
+                cached_schema_version = cache.schema_version,
+                cached_provider = ?cache.provider_identity,
+                expected_provider,
+                models_count = cache.models.len(),
+                "models cache: last-known-good entry is not usable"
+            );
+            return None;
+        }
+        info!(
+            cache_path = %self.cache_path.display(),
+            cached_version = ?cache.client_version,
+            fetched_at = %cache.fetched_at,
+            models_count = cache.models.len(),
+            "models cache: using last-known-good catalog"
+        );
+        Some(cache)
+    }
+
     /// Persist the cache to disk, creating parent directories as needed.
     pub(crate) async fn persist_cache(
         &self,
         models: &[ModelInfo],
         etag: Option<String>,
         client_version: String,
+        provider_identity: String,
     ) {
         let cache = ModelsCache {
+            schema_version: MODELS_CACHE_SCHEMA_VERSION,
             fetched_at: Utc::now(),
             etag,
             client_version: Some(client_version),
+            provider_identity: Some(provider_identity),
             models: models.to_vec(),
         };
         if let Err(err) = self.save_internal(&cache).await {
@@ -119,7 +187,22 @@ impl ModelsCacheManager {
         }
         let json = serde_json::to_vec_pretty(cache)
             .map_err(|err| io::Error::new(ErrorKind::InvalidData, err.to_string()))?;
-        fs::write(&self.cache_path, json).await
+        let cache_path = self.cache_path.clone();
+        tokio::task::spawn_blocking(move || {
+            let parent = cache_path.parent().ok_or_else(|| {
+                io::Error::new(
+                    ErrorKind::InvalidInput,
+                    format!("models cache path has no parent: {}", cache_path.display()),
+                )
+            })?;
+            let mut temp = NamedTempFile::new_in(parent)?;
+            temp.write_all(&json)?;
+            temp.as_file().sync_all()?;
+            temp.persist(&cache_path).map_err(|err| err.error)?;
+            Ok(())
+        })
+        .await
+        .map_err(io::Error::other)?
     }
 
     #[cfg(test)]
@@ -160,15 +243,29 @@ impl ModelsCacheManager {
 /// Serialized snapshot of models and metadata cached on disk.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct ModelsCache {
+    #[serde(default = "default_models_cache_schema_version")]
+    pub(crate) schema_version: u32,
     pub(crate) fetched_at: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) etag: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) client_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) provider_identity: Option<String>,
     pub(crate) models: Vec<ModelInfo>,
 }
 
 impl ModelsCache {
+    fn is_schema_compatible(&self) -> bool {
+        self.schema_version == MODELS_CACHE_SCHEMA_VERSION
+    }
+
+    fn matches_provider(&self, expected_provider: &str) -> bool {
+        self.provider_identity
+            .as_deref()
+            .is_none_or(|provider| provider == expected_provider)
+    }
+
     /// Returns `true` when the cache entry has not exceeded the configured TTL.
     fn is_fresh(&self, ttl: Duration) -> bool {
         if ttl.is_zero() {
@@ -180,4 +277,8 @@ impl ModelsCache {
         let age = Utc::now().signed_duration_since(self.fetched_at);
         age <= ttl_duration
     }
+}
+
+const fn default_models_cache_schema_version() -> u32 {
+    MODELS_CACHE_SCHEMA_VERSION
 }

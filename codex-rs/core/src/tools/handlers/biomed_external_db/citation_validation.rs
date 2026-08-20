@@ -359,10 +359,21 @@ mod tests {
                 citation_metadata_mismatch(Some(true), Some(true), Some(false)),
                 citation_metadata_mismatch(Some(false), Some(true), Some(true)),
                 citation_metadata_mismatch(Some(true), Some(false), Some(true)),
-                citation_metadata_mismatch(None, Some(true), Some(false)),
-                citation_metadata_mismatch(None, None, Some(false)),
-                citation_metadata_mismatch(None, None, Some(true)),
-                citation_metadata_mismatch(None, None, None),
+                citation_metadata_mismatch(/*title_match*/ None, Some(true), Some(false)),
+                citation_metadata_mismatch(
+                    /*title_match*/ None,
+                    /*year_match*/ None,
+                    Some(false)
+                ),
+                citation_metadata_mismatch(
+                    /*title_match*/ None,
+                    /*year_match*/ None,
+                    Some(true)
+                ),
+                citation_metadata_mismatch(
+                    /*title_match*/ None, /*year_match*/ None,
+                    /*authors_match*/ None
+                ),
             ],
             [false, true, true, false, true, false, false]
         );

@@ -69,6 +69,18 @@ async fn models_client_hits_models_endpoint() {
                     effort: ReasoningEffort::High,
                     description: ReasoningEffort::High.to_string(),
                 },
+                ReasoningEffortPreset {
+                    effort: ReasoningEffort::Max,
+                    description: ReasoningEffort::Max.to_string(),
+                },
+                ReasoningEffortPreset {
+                    effort: ReasoningEffort::Ultra,
+                    description: ReasoningEffort::Ultra.to_string(),
+                },
+                ReasoningEffortPreset {
+                    effort: ReasoningEffort::Custom("future".to_string()),
+                    description: "provider-defined future effort".to_string(),
+                },
             ],
             shell_type: ConfigShellToolType::ShellCommand,
             visibility: ModelVisibility::List,
@@ -119,8 +131,7 @@ async fn models_client_hits_models_endpoint() {
         .await
         .expect("models request should succeed");
 
-    assert_eq!(models.len(), 1);
-    assert_eq!(models[0].slug, "gpt-test");
+    assert_eq!(models, response.models);
 
     let received = server
         .received_requests()

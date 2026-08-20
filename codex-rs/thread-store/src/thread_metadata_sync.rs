@@ -238,7 +238,7 @@ impl ThreadMetadataSync {
                         update.cwd = Some(turn_ctx.cwd.clone());
                     }
                     update.model = Some(turn_ctx.model.clone());
-                    update.reasoning_effort = turn_ctx.effort;
+                    update.reasoning_effort = turn_ctx.effort.clone();
                     update.approval_mode = Some(turn_ctx.approval_policy);
                     update.sandbox_policy = Some(turn_ctx.sandbox_policy.clone());
                 }

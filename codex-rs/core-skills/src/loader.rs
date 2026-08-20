@@ -1073,7 +1073,7 @@ pub(crate) async fn skill_roots_from_layer_stack(
         config_layer_stack,
         cwd,
         home_dir,
-        None,
+        /*managed_package_root*/ None,
         Vec::new(),
     )
     .await

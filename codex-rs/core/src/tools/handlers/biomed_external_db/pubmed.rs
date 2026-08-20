@@ -517,8 +517,14 @@ mod tests {
             pubmed_year_range_json(Some(2015), Some(2020)),
             json!({"datetype": "pdat", "mindate": 2015, "maxdate": 2020})
         );
-        assert_eq!(pubmed_year_range_json(None, None), Value::Null);
-        assert_eq!(pubmed_year_range_json(Some(2015), None), Value::Null);
+        assert_eq!(
+            pubmed_year_range_json(/*min_year*/ None, /*max_year*/ None),
+            Value::Null
+        );
+        assert_eq!(
+            pubmed_year_range_json(Some(2015), /*max_year*/ None),
+            Value::Null
+        );
     }
     #[test]
     fn detects_dropped_field_tags_from_a_detail_free_errorlist() {
@@ -571,14 +577,17 @@ mod tests {
     }
     #[test]
     fn pubmed_year_range_requires_both_bounds_and_ordering() {
-        assert_eq!(pubmed_year_range(None, None).ok(), Some(None));
+        assert_eq!(
+            pubmed_year_range(/*min_year*/ None, /*max_year*/ None).ok(),
+            Some(None)
+        );
         assert_eq!(
             pubmed_year_range(Some(2015), Some(2026)).ok(),
             Some(Some((2015, 2026)))
         );
         // A lone bound would silently drop the filter, so it is an error.
-        assert!(pubmed_year_range(Some(2015), None).is_err());
-        assert!(pubmed_year_range(None, Some(2026)).is_err());
+        assert!(pubmed_year_range(Some(2015), /*max_year*/ None).is_err());
+        assert!(pubmed_year_range(/*min_year*/ None, Some(2026)).is_err());
         assert!(pubmed_year_range(Some(2026), Some(2015)).is_err());
     }
     #[test]

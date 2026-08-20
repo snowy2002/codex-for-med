@@ -5,11 +5,12 @@ use crate::provider::Provider;
 use codex_client::HttpTransport;
 use codex_client::RequestTelemetry;
 use codex_protocol::openai_models::ModelInfo;
-use codex_protocol::openai_models::ModelsResponse;
 use http::HeaderMap;
 use http::Method;
 use http::header::ETAG;
+use serde_json::Value;
 use std::sync::Arc;
+use tracing::warn;
 
 pub struct ModelsClient<T: HttpTransport> {
     session: EndpointSession<T>,
@@ -61,16 +62,54 @@ impl<T: HttpTransport> ModelsClient<T> {
             .and_then(|value| value.to_str().ok())
             .map(ToString::to_string);
 
-        let ModelsResponse { models } = serde_json::from_slice::<ModelsResponse>(&resp.body)
-            .map_err(|e| {
-                ApiError::Stream(format!(
-                    "failed to decode models response: {e}; body: {}",
-                    String::from_utf8_lossy(&resp.body)
-                ))
-            })?;
+        let models = decode_models_response(&resp.body)?;
 
         Ok((models, header_etag))
     }
+}
+
+fn decode_models_response(body: &[u8]) -> Result<Vec<ModelInfo>, ApiError> {
+    let response: Value = serde_json::from_slice(body)
+        .map_err(|err| ApiError::Stream(format!("failed to decode models response: {err}")))?;
+    let model_values = response
+        .get("models")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            ApiError::Stream("failed to decode models response: missing models array".to_string())
+        })?;
+
+    let mut models = Vec::with_capacity(model_values.len());
+    let mut first_error = None;
+    let mut skipped = 0usize;
+    for (index, value) in model_values.iter().enumerate() {
+        match serde_json::from_value::<ModelInfo>(value.clone()) {
+            Ok(model) => models.push(model),
+            Err(err) => {
+                skipped += 1;
+                first_error.get_or_insert_with(|| err.to_string());
+                let slug = value
+                    .get("slug")
+                    .and_then(Value::as_str)
+                    .unwrap_or("<unknown>");
+                warn!(index, slug, error = %err, "skipping incompatible model catalog entry");
+            }
+        }
+    }
+
+    if models.is_empty() && skipped > 0 {
+        let first_error = first_error.unwrap_or_else(|| "unknown decode error".to_string());
+        return Err(ApiError::Stream(format!(
+            "failed to decode all {skipped} model catalog entries; first error: {first_error}"
+        )));
+    }
+    if skipped > 0 {
+        warn!(
+            valid_models = models.len(),
+            skipped_models = skipped,
+            "partially decoded model catalog"
+        );
+    }
+    Ok(models)
 }
 
 #[cfg(test)]
@@ -83,6 +122,7 @@ mod tests {
     use codex_client::Response;
     use codex_client::StreamResponse;
     use codex_client::TransportError;
+    use codex_protocol::openai_models::ReasoningEffort;
     use http::HeaderMap;
     use http::StatusCode;
     use pretty_assertions::assert_eq;
@@ -94,7 +134,7 @@ mod tests {
     #[derive(Clone)]
     struct CapturingTransport {
         last_request: Arc<Mutex<Option<Request>>>,
-        body: Arc<ModelsResponse>,
+        body: Arc<Value>,
         etag: Option<String>,
     }
 
@@ -102,7 +142,7 @@ mod tests {
         fn default() -> Self {
             Self {
                 last_request: Arc::new(Mutex::new(None)),
-                body: Arc::new(ModelsResponse { models: Vec::new() }),
+                body: Arc::new(json!({"models": []})),
                 etag: None,
             }
         }
@@ -155,7 +195,7 @@ mod tests {
 
     #[tokio::test]
     async fn appends_client_version_query() {
-        let response = ModelsResponse { models: Vec::new() };
+        let response = json!({"models": []});
 
         let transport = CapturingTransport {
             last_request: Arc::new(Mutex::new(None)),
@@ -191,15 +231,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn parses_models_response() {
-        let response = ModelsResponse {
-            models: vec![
-                serde_json::from_value(json!({
+    async fn preserves_future_efforts_and_skips_an_incompatible_entry() {
+        let response = json!({
+            "models": [
+                {
                     "slug": "gpt-test",
                     "display_name": "gpt-test",
                     "description": "desc",
                     "default_reasoning_level": "medium",
-                    "supported_reasoning_levels": [{"effort": "low", "description": "low"}, {"effort": "medium", "description": "medium"}, {"effort": "high", "description": "high"}],
+                    "supported_reasoning_levels": [{"effort": "low", "description": "low"}, {"effort": "quantum", "description": "future value"}],
                     "shell_type": "shell_command",
                     "visibility": "list",
                     "minimal_client_version": [0, 99, 0],
@@ -216,10 +256,10 @@ mod tests {
                     "supports_image_detail_original": false,
                     "context_window": 272_000,
                     "experimental_supported_tools": [],
-                }))
-                .unwrap(),
-            ],
-        };
+                },
+                {"slug": 7}
+            ]
+        });
 
         let transport = CapturingTransport {
             last_request: Arc::new(Mutex::new(None)),
@@ -240,13 +280,28 @@ mod tests {
 
         assert_eq!(models.len(), 1);
         assert_eq!(models[0].slug, "gpt-test");
-        assert_eq!(models[0].supported_in_api, true);
+        assert_eq!(
+            models[0].supported_reasoning_levels[1].effort,
+            ReasoningEffort::Custom("quantum".to_string())
+        );
+        assert!(models[0].supported_in_api);
         assert_eq!(models[0].priority, 1);
+    }
+
+    #[test]
+    fn rejects_catalog_when_every_entry_is_incompatible() {
+        let err = decode_models_response(br#"{"models":[{"slug":7}]}"#)
+            .expect_err("an entirely incompatible catalog must not replace known-good models");
+
+        assert!(
+            err.to_string()
+                .contains("failed to decode all 1 model catalog entries")
+        );
     }
 
     #[tokio::test]
     async fn list_models_includes_etag() {
-        let response = ModelsResponse { models: Vec::new() };
+        let response = json!({"models": []});
 
         let transport = CapturingTransport {
             last_request: Arc::new(Mutex::new(None)),

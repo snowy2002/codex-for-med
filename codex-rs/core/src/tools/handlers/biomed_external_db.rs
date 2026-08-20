@@ -995,7 +995,12 @@ ORIGIN
 //
 "#;
 
-        let parsed = parse_genbank_flatfile(record, GenbankDb::Protein, "QHD43416.1", 100);
+        let parsed = parse_genbank_flatfile(
+            record,
+            GenbankDb::Protein,
+            "QHD43416.1",
+            /*max_features*/ 100,
+        );
 
         assert_eq!(parsed.accession, Some("QHD43416".to_string()));
         assert_eq!(parsed.version, Some("QHD43416.1".to_string()));

@@ -321,7 +321,7 @@ async fn qdrant_collection_point_count(
             qdrant_url.trim_end_matches('/')
         ),
         api_key,
-        None,
+        /*body*/ None,
     )
     .await?;
     response

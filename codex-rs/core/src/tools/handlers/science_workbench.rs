@@ -397,7 +397,9 @@ fn sql_api_url() -> String {
 async fn list_med_knowledge_collections(
     client: &reqwest::Client,
 ) -> Result<String, FunctionCallError> {
-    let qdrant = QdrantRuntimeConfig::from_environment(None, None)?;
+    let qdrant = QdrantRuntimeConfig::from_environment(
+        /*url_override*/ None, /*collection_override*/ None,
+    )?;
     let vector = qdrant_collection_info(client, &qdrant).await?;
     let sql = sql_schema(client).await?;
     let output = json!({
@@ -435,7 +437,9 @@ async fn describe_med_database(
     client: &reqwest::Client,
     args: DescribeMedDatabaseArgs,
 ) -> Result<String, FunctionCallError> {
-    let qdrant = QdrantRuntimeConfig::from_environment(None, None)?;
+    let qdrant = QdrantRuntimeConfig::from_environment(
+        /*url_override*/ None, /*collection_override*/ None,
+    )?;
     let mut output = json!({
         "summary": {
             "sql": "Structured antibody metadata and sequence/assay fields.",
@@ -495,7 +499,9 @@ async fn literature_map(
             "topic must not be empty".to_string(),
         ));
     }
-    let qdrant = QdrantRuntimeConfig::from_environment(None, None)?;
+    let qdrant = QdrantRuntimeConfig::from_environment(
+        /*url_override*/ None, /*collection_override*/ None,
+    )?;
     let started_at = chrono::Utc::now();
     let project_id = args
         .project_id
@@ -846,7 +852,7 @@ async fn vector_category_counts(
     client: &reqwest::Client,
     qdrant: &QdrantRuntimeConfig,
 ) -> Result<Value, FunctionCallError> {
-    let total = qdrant_count(client, qdrant, None).await?;
+    let total = qdrant_count(client, qdrant, /*filter*/ None).await?;
     let bio_literature = qdrant_count(
         client,
         qdrant,

@@ -607,7 +607,7 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
 
     let default_cwd = config.cwd.to_path_buf();
     let default_approval_policy = config.permissions.approval_policy.value();
-    let default_effort = config.model_reasoning_effort;
+    let default_effort = config.model_reasoning_effort.clone();
 
     let (initial_operation, prompt_summary) = match (command.as_ref(), prompt, images) {
         (Some(ExecCommand::Review(review_cli)), _, _) => {
@@ -1080,7 +1080,7 @@ fn session_configured_from_thread_start_response(
         config.permissions.effective_permission_profile(),
         response.active_permission_profile.clone().map(Into::into),
         response.cwd.clone(),
-        response.reasoning_effort,
+        response.reasoning_effort.clone(),
     )
 }
 
@@ -1102,7 +1102,7 @@ fn session_configured_from_thread_resume_response(
         config.permissions.effective_permission_profile(),
         response.active_permission_profile.clone().map(Into::into),
         response.cwd.clone(),
-        response.reasoning_effort,
+        response.reasoning_effort.clone(),
     )
 }
 

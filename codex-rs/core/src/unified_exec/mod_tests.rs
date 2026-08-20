@@ -21,6 +21,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::time::Duration;
 use tokio::time::Instant;
+use tokio_util::sync::CancellationToken;
 
 async fn test_session_and_turn() -> (Arc<Session>, Arc<TurnContext>) {
     let (session, turn) = make_session_and_context().await;
@@ -233,6 +234,46 @@ fn head_tail_buffer_default_preserves_prefix_and_suffix() {
     let rendered = buffer.to_bytes();
     assert_eq!(rendered.first(), Some(&b'a'));
     assert!(rendered.ends_with(b"bc"));
+}
+
+#[tokio::test]
+async fn collect_output_resets_post_exit_wait_after_each_chunk() {
+    let output_buffer = Arc::new(tokio::sync::Mutex::new(HeadTailBuffer::default()));
+    let output_notify = Arc::new(tokio::sync::Notify::new());
+    let output_closed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let output_closed_notify = Arc::new(tokio::sync::Notify::new());
+    let cancellation_token = CancellationToken::new();
+    cancellation_token.cancel();
+
+    let producer = {
+        let output_buffer = Arc::clone(&output_buffer);
+        let output_notify = Arc::clone(&output_notify);
+        let output_closed = Arc::clone(&output_closed);
+        let output_closed_notify = Arc::clone(&output_closed_notify);
+        tokio::spawn(async move {
+            for chunk in [b"one".as_slice(), b"two", b"three"] {
+                tokio::time::sleep(Duration::from_millis(30)).await;
+                output_buffer.lock().await.push_chunk(chunk.to_vec());
+                output_notify.notify_waiters();
+            }
+            output_closed.store(true, std::sync::atomic::Ordering::Release);
+            output_closed_notify.notify_waiters();
+        })
+    };
+
+    let collected = UnifiedExecProcessManager::collect_output_until_deadline(
+        &output_buffer,
+        &output_notify,
+        &output_closed,
+        &output_closed_notify,
+        &cancellation_token,
+        /*pause_state*/ None,
+        Instant::now() + Duration::from_secs(1),
+    )
+    .await;
+    producer.await.expect("producer should finish");
+
+    assert_eq!(collected, b"onetwothree");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

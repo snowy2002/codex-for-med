@@ -20,6 +20,7 @@ use tokio::sync::TryLockError;
 use tracing::Instrument as _;
 use tracing::error;
 use tracing::info;
+use tracing::warn;
 
 const MODEL_CACHE_FILE: &str = "models_cache.json";
 const DEFAULT_MODEL_CACHE_TTL: Duration = Duration::from_secs(300);
@@ -31,6 +32,11 @@ const DEFAULT_MODEL_CACHE_TTL: Duration = Duration::from_secs(300);
 /// this endpoint only when it decides a remote refresh should happen.
 #[async_trait]
 pub trait ModelsEndpointClient: fmt::Debug + Send + Sync {
+    /// Stable, non-secret provider identity used to prevent cache reuse across endpoints.
+    fn cache_identity(&self) -> String {
+        "openai-compatible-default".to_string()
+    }
+
     /// Returns whether this provider can authenticate command-scoped requests.
     fn has_command_auth(&self) -> bool;
 
@@ -269,19 +275,23 @@ impl OpenAiModelsManager {
     /// Refresh available models according to the specified strategy.
     async fn refresh_available_models(&self, refresh_strategy: RefreshStrategy) -> CoreResult<()> {
         if !self.should_refresh_models().await {
-            if matches!(
-                refresh_strategy,
-                RefreshStrategy::Offline | RefreshStrategy::OnlineIfUncached
-            ) {
-                self.try_load_cache().await;
+            match refresh_strategy {
+                RefreshStrategy::Offline => {
+                    self.try_load_last_known_good().await;
+                }
+                RefreshStrategy::OnlineIfUncached => {
+                    self.try_load_cache().await;
+                }
+                RefreshStrategy::Online => {}
             }
             return Ok(());
         }
 
         match refresh_strategy {
             RefreshStrategy::Offline => {
-                // Only try to load from cache, never fetch
-                self.try_load_cache().await;
+                // Explicit offline mode accepts a stale, cross-version cache as long as its schema
+                // is compatible. It never attempts a network refresh.
+                self.try_load_last_known_good().await;
                 Ok(())
             }
             RefreshStrategy::OnlineIfUncached => {
@@ -291,11 +301,29 @@ impl OpenAiModelsManager {
                     return Ok(());
                 }
                 info!("models cache: cache miss, fetching remote models");
-                self.fetch_and_update_models().await
+                self.fetch_and_update_models_with_fallback().await
             }
             RefreshStrategy::Online => {
-                // Always fetch from network
-                self.fetch_and_update_models().await
+                // Always attempt the network first, then keep the last known catalog available if
+                // the refresh fails.
+                self.fetch_and_update_models_with_fallback().await
+            }
+        }
+    }
+
+    async fn fetch_and_update_models_with_fallback(&self) -> CoreResult<()> {
+        match self.fetch_and_update_models().await {
+            Ok(()) => Ok(()),
+            Err(err) => {
+                if self.try_load_last_known_good().await {
+                    warn!(
+                        error = %err,
+                        "remote model refresh failed; continuing with last-known-good catalog"
+                    );
+                    Ok(())
+                } else {
+                    Err(err)
+                }
             }
         }
     }
@@ -305,9 +333,18 @@ impl OpenAiModelsManager {
         let (models, etag) = self.endpoint_client.list_models(&client_version).await?;
         self.apply_remote_models(models.clone()).await;
         *self.etag.write().await = etag.clone();
-        self.cache_manager
-            .persist_cache(&models, etag, client_version)
-            .await;
+        if models.is_empty() {
+            warn!("remote model refresh returned an empty catalog; preserving disk cache");
+        } else {
+            self.cache_manager
+                .persist_cache(
+                    &models,
+                    etag,
+                    client_version,
+                    self.endpoint_client.cache_identity(),
+                )
+                .await;
+        }
         Ok(())
     }
 
@@ -358,16 +395,35 @@ impl OpenAiModelsManager {
             codex_otel::start_global_timer("codex.remote_models.load_cache.duration_ms", &[]);
         let client_version = crate::client_version_to_whole();
         info!(client_version, "models cache: evaluating cache eligibility");
-        // TODO(celia-oai): Include provider identity in cache eligibility so switching
-        // providers does not reuse a fresh models_cache.json entry from another provider.
-        let cache = match self.cache_manager.load_fresh(&client_version).await {
+        let provider_identity = self.endpoint_client.cache_identity();
+        let cache = match self
+            .cache_manager
+            .load_fresh(&client_version, &provider_identity)
+            .await
+        {
             Some(cache) => cache,
             None => {
                 info!("models cache: no usable cache entry");
                 return false;
             }
         };
-        let models = cache.models.clone();
+        self.apply_cache(cache).await
+    }
+
+    async fn try_load_last_known_good(&self) -> bool {
+        let provider_identity = self.endpoint_client.cache_identity();
+        let Some(cache) = self
+            .cache_manager
+            .load_last_known_good(&provider_identity)
+            .await
+        else {
+            return false;
+        };
+        self.apply_cache(cache).await
+    }
+
+    async fn apply_cache(&self, cache: super::cache::ModelsCache) -> bool {
+        let models = cache.models;
         *self.etag.write().await = cache.etag.clone();
         self.apply_remote_models(models.clone()).await;
         info!(

@@ -72,7 +72,7 @@ async fn record_initial_history_resumed_bare_turn_context_does_not_hydrate_previ
         personality: turn_context.personality,
         collaboration_mode: Some(turn_context.collaboration_mode.clone()),
         realtime_active: Some(turn_context.realtime_active),
-        effort: turn_context.reasoning_effort,
+        effort: turn_context.reasoning_effort.clone(),
         summary: codex_protocol::config_types::ReasoningSummary::Auto,
     };
     let rollout_items = vec![RolloutItem::TurnContext(previous_context_item)];
@@ -109,7 +109,7 @@ async fn record_initial_history_resumed_hydrates_previous_turn_settings_from_lif
         personality: turn_context.personality,
         collaboration_mode: Some(turn_context.collaboration_mode.clone()),
         realtime_active: Some(turn_context.realtime_active),
-        effort: turn_context.reasoning_effort,
+        effort: turn_context.reasoning_effort.clone(),
         summary: codex_protocol::config_types::ReasoningSummary::Auto,
     };
     let turn_id = previous_context_item
@@ -944,7 +944,7 @@ async fn record_initial_history_resumed_turn_context_after_compaction_reestablis
         personality: turn_context.personality,
         collaboration_mode: Some(turn_context.collaboration_mode.clone()),
         realtime_active: Some(turn_context.realtime_active),
-        effort: turn_context.reasoning_effort,
+        effort: turn_context.reasoning_effort.clone(),
         summary: codex_protocol::config_types::ReasoningSummary::Auto,
     };
     let previous_turn_id = previous_context_item
@@ -1020,7 +1020,7 @@ async fn record_initial_history_resumed_turn_context_after_compaction_reestablis
             personality: turn_context.personality,
             collaboration_mode: Some(turn_context.collaboration_mode.clone()),
             realtime_active: Some(turn_context.realtime_active),
-            effort: turn_context.reasoning_effort,
+            effort: turn_context.reasoning_effort.clone(),
             summary: codex_protocol::config_types::ReasoningSummary::Auto,
         }))
         .expect("serialize expected reference context item")
@@ -1047,7 +1047,7 @@ async fn record_initial_history_resumed_aborted_turn_without_id_clears_active_tu
         personality: turn_context.personality,
         collaboration_mode: Some(turn_context.collaboration_mode.clone()),
         realtime_active: Some(turn_context.realtime_active),
-        effort: turn_context.reasoning_effort,
+        effort: turn_context.reasoning_effort.clone(),
         summary: codex_protocol::config_types::ReasoningSummary::Auto,
     };
     let previous_turn_id = previous_context_item
@@ -1162,7 +1162,7 @@ async fn record_initial_history_resumed_unmatched_abort_preserves_active_turn_fo
         personality: turn_context.personality,
         collaboration_mode: Some(turn_context.collaboration_mode.clone()),
         realtime_active: Some(turn_context.realtime_active),
-        effort: turn_context.reasoning_effort,
+        effort: turn_context.reasoning_effort.clone(),
         summary: codex_protocol::config_types::ReasoningSummary::Auto,
     };
 
@@ -1276,7 +1276,7 @@ async fn record_initial_history_resumed_trailing_incomplete_turn_compaction_clea
         personality: turn_context.personality,
         collaboration_mode: Some(turn_context.collaboration_mode.clone()),
         realtime_active: Some(turn_context.realtime_active),
-        effort: turn_context.reasoning_effort,
+        effort: turn_context.reasoning_effort.clone(),
         summary: codex_protocol::config_types::ReasoningSummary::Auto,
     };
     let previous_turn_id = previous_context_item
@@ -1430,7 +1430,7 @@ async fn record_initial_history_resumed_replaced_incomplete_compacted_turn_clear
         personality: turn_context.personality,
         collaboration_mode: Some(turn_context.collaboration_mode.clone()),
         realtime_active: Some(turn_context.realtime_active),
-        effort: turn_context.reasoning_effort,
+        effort: turn_context.reasoning_effort.clone(),
         summary: codex_protocol::config_types::ReasoningSummary::Auto,
     };
     let previous_turn_id = previous_context_item

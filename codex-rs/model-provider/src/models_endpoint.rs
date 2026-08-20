@@ -67,6 +67,14 @@ impl OpenAiModelsEndpoint {
 
 #[async_trait]
 impl ModelsEndpointClient for OpenAiModelsEndpoint {
+    fn cache_identity(&self) -> String {
+        format!(
+            "{}|{}",
+            self.provider_info.name,
+            self.provider_info.base_url.as_deref().unwrap_or_default()
+        )
+    }
+
     fn has_command_auth(&self) -> bool {
         self.provider_info.has_command_auth()
     }

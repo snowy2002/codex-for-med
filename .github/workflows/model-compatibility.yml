@@ -1,0 +1,64 @@
+name: model-compatibility
+
+on:
+  pull_request:
+    paths:
+      - "codex-rs/protocol/src/openai_models.rs"
+      - "codex-rs/codex-api/src/endpoint/models.rs"
+      - "codex-rs/models-manager/**"
+      - "codex-rs/model-provider/src/models_endpoint.rs"
+      - "codex-rs/tui/src/chatwidget/model_popups.rs"
+      - "codex-rs/tui/src/chatwidget/reasoning_shortcuts.rs"
+      - "codex-cli/bin/codex.js"
+      - "scripts/check_model_compatibility.py"
+      - ".github/workflows/model-compatibility.yml"
+  push:
+    branches: [main]
+    paths:
+      - "codex-rs/protocol/src/openai_models.rs"
+      - "codex-rs/codex-api/src/endpoint/models.rs"
+      - "codex-rs/models-manager/**"
+      - "codex-rs/model-provider/src/models_endpoint.rs"
+      - "codex-cli/bin/codex.js"
+      - "scripts/check_model_compatibility.py"
+  schedule:
+    - cron: "17 3 * * 1-5"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audited-baseline:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+      - name: Fetch audited upstream revision
+        shell: bash
+        run: |
+          set -euo pipefail
+          revision="$(python3 -c 'import json; print(json.load(open("codex-rs/build-info/upstream_compatibility.json"))["upstream"]["revision"])')"
+          git fetch --no-tags --depth=1 https://github.com/openai/codex.git "${revision}"
+          git update-ref refs/remotes/upstream/audited FETCH_HEAD
+      - name: Validate audited compatibility contract
+        run: python3 scripts/check_model_compatibility.py --upstream-ref refs/remotes/upstream/audited
+
+  latest-upstream-drift:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+      - name: Fetch latest official Codex main
+        run: git fetch --no-tags --depth=1 https://github.com/openai/codex.git main
+      - name: Detect model compatibility drift
+        run: python3 scripts/check_model_compatibility.py --upstream-ref FETCH_HEAD

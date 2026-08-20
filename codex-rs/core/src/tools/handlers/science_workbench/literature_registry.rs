@@ -220,7 +220,7 @@ impl LiteratureRegistry {
                 "identifier_conflict",
                 &normalized,
                 &matched_literature_ids,
-                None,
+                /*candidate_evaluation*/ None,
                 now,
             )
             .await?;
@@ -289,7 +289,7 @@ impl LiteratureRegistry {
                 "identifier_conflict",
                 &normalized,
                 &matched_literature_ids,
-                None,
+                /*candidate_evaluation*/ None,
                 now,
             )
             .await?;
@@ -1070,7 +1070,7 @@ mod tests {
         let first = registry
             .register(
                 input("PMID:123", "First title"),
-                None,
+                /*source*/ None,
                 "2026-01-01T00:00:00Z",
             )
             .await
@@ -1078,7 +1078,7 @@ mod tests {
         let second = registry
             .register(
                 input("https://pubmed.ncbi.nlm.nih.gov/123/", "Second title"),
-                None,
+                /*source*/ None,
                 "2026-01-02T00:00:00Z",
             )
             .await
@@ -1104,7 +1104,7 @@ mod tests {
                 registry
                     .register(
                         input("789", "Concurrent title"),
-                        None,
+                        /*source*/ None,
                         "2026-01-01T00:00:00Z",
                     )
                     .await
@@ -1137,12 +1137,12 @@ mod tests {
         let (first, second) = tokio::join!(
             first_registry.register(
                 input("790", "Cross-pool title"),
-                None,
+                /*source*/ None,
                 "2026-01-01T00:00:00Z"
             ),
             second_registry.register(
                 input("790", "Cross-pool title"),
-                None,
+                /*source*/ None,
                 "2026-01-01T00:00:00Z"
             ),
         );
@@ -1162,7 +1162,11 @@ mod tests {
     async fn creates_consistent_sqlite_backup_without_overwriting() {
         let (temp, registry) = registry().await;
         registry
-            .register(input("800", "Backed up"), None, "2026-01-01T00:00:00Z")
+            .register(
+                input("800", "Backed up"),
+                /*source*/ None,
+                "2026-01-01T00:00:00Z",
+            )
             .await
             .expect("register");
         let backup = temp.path().join("backups").join("literatures.sqlite3");
@@ -1193,7 +1197,7 @@ mod tests {
                     }),
                     ..Default::default()
                 },
-                None,
+                /*source*/ None,
                 "2026-01-01T00:00:00Z",
             )
             .await
@@ -1213,7 +1217,7 @@ mod tests {
                     }),
                     ..Default::default()
                 },
-                None,
+                /*source*/ None,
                 "2026-02-01T00:00:00Z",
             )
             .await
@@ -1236,7 +1240,7 @@ mod tests {
                     }),
                     ..Default::default()
                 },
-                None,
+                /*source*/ None,
                 "2026-02-02T00:00:00Z",
             )
             .await
@@ -1300,7 +1304,11 @@ mod tests {
     async fn records_conflicting_strong_identifiers_for_review() {
         let (_temp, registry) = registry().await;
         let RegistrationOutcome::Registered(first) = registry
-            .register(input("1", "One"), None, "2026-01-01T00:00:00Z")
+            .register(
+                input("1", "One"),
+                /*source*/ None,
+                "2026-01-01T00:00:00Z",
+            )
             .await
             .expect("register first")
         else {
@@ -1314,7 +1322,7 @@ mod tests {
                     metadata: json!({}),
                     ..Default::default()
                 },
-                None,
+                /*source*/ None,
                 "2026-01-01T00:00:00Z",
             )
             .await
@@ -1330,7 +1338,7 @@ mod tests {
                     metadata: json!({}),
                     ..Default::default()
                 },
-                None,
+                /*source*/ None,
                 "2026-01-02T00:00:00Z",
             )
             .await
@@ -1359,7 +1367,7 @@ mod tests {
                     metadata: json!({}),
                     ..Default::default()
                 },
-                None,
+                /*source*/ None,
                 "2026-01-01T00:00:00Z",
             )
             .await
@@ -1372,7 +1380,7 @@ mod tests {
                     metadata: json!({}),
                     ..Default::default()
                 },
-                None,
+                /*source*/ None,
                 "2026-01-02T00:00:00Z",
             )
             .await
@@ -1528,9 +1536,9 @@ mod tests {
                 "collection",
                 "profile",
                 "possible_duplicate",
-                None,
+                /*existing_dataset*/ None,
                 Some(&review_case_id),
-                None,
+                /*last_error*/ None,
                 "2026-01-02T00:00:00Z",
             )
             .await
@@ -1581,7 +1589,11 @@ mod tests {
     async fn manual_merge_preserves_alias_and_combines_identifiers() {
         let (_temp, registry) = registry().await;
         let RegistrationOutcome::Registered(canonical) = registry
-            .register(input("123", "Canonical"), None, "2026-01-01T00:00:00Z")
+            .register(
+                input("123", "Canonical"),
+                /*source*/ None,
+                "2026-01-01T00:00:00Z",
+            )
             .await
             .expect("register canonical")
         else {
@@ -1595,7 +1607,7 @@ mod tests {
                     metadata: json!({}),
                     ..Default::default()
                 },
-                None,
+                /*source*/ None,
                 "2026-01-01T00:00:00Z",
             )
             .await
@@ -1609,7 +1621,7 @@ mod tests {
                 &canonical.literature_id,
                 &alias.literature_id,
                 "human review",
-                None,
+                /*review_case_id*/ None,
                 "2026-01-02T00:00:00Z",
             )
             .await
@@ -1636,7 +1648,11 @@ mod tests {
     async fn vector_lease_blocks_competitors_and_releases_on_completion() {
         let (_temp, registry) = registry().await;
         let RegistrationOutcome::Registered(literature) = registry
-            .register(input("456", "Lease"), None, "2026-01-01T00:00:00Z")
+            .register(
+                input("456", "Lease"),
+                /*source*/ None,
+                "2026-01-01T00:00:00Z",
+            )
             .await
             .expect("register")
         else {
@@ -1662,7 +1678,14 @@ mod tests {
             }
         );
         registry
-            .update_claimed_vector_job(&lease, "complete", Some(2), Some(2), None, now)
+            .update_claimed_vector_job(
+                &lease,
+                "complete",
+                Some(2),
+                Some(2),
+                /*last_error*/ None,
+                now,
+            )
             .await
             .expect("complete");
         assert_eq!(
@@ -1685,7 +1708,7 @@ mod tests {
         let RegistrationOutcome::Registered(literature) = first_registry
             .register(
                 input("458", "Concurrent lease"),
-                None,
+                /*source*/ None,
                 "2026-01-01T00:00:00Z",
             )
             .await
@@ -1735,7 +1758,11 @@ mod tests {
     async fn expired_vector_lease_can_be_taken_over() {
         let (_temp, registry) = registry().await;
         let RegistrationOutcome::Registered(literature) = registry
-            .register(input("457", "Expired lease"), None, "2026-01-01T00:00:00Z")
+            .register(
+                input("457", "Expired lease"),
+                /*source*/ None,
+                "2026-01-01T00:00:00Z",
+            )
             .await
             .expect("register")
         else {
@@ -1774,7 +1801,7 @@ mod tests {
         let RegistrationOutcome::Registered(literature) = registry
             .register(
                 input("459", "Incomplete terminal job"),
-                None,
+                /*source*/ None,
                 "2026-01-01T00:00:00Z",
             )
             .await
@@ -1788,9 +1815,9 @@ mod tests {
                 "collection",
                 "profile",
                 "complete",
-                None,
-                None,
-                None,
+                /*existing_dataset*/ None,
+                /*review_case_id*/ None,
+                /*last_error*/ None,
                 "2026-01-01T00:00:00Z",
             )
             .await
@@ -1805,8 +1832,8 @@ mod tests {
                     &literature.literature_id,
                     "collection",
                     "profile",
-                    3,
-                    1,
+                    /*expected_point_count*/ 3,
+                    /*verified_point_count*/ 1,
                     now,
                 )
                 .await

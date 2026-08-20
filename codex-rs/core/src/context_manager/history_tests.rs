@@ -1075,6 +1075,29 @@ fn record_items_truncates_custom_tool_call_output_content() {
 }
 
 #[test]
+fn record_items_preserves_code_mode_output_limit() {
+    let mut history = ContextManager::new();
+    let policy = TruncationPolicy::Tokens(10);
+    let long_output = "code mode output repeated many times ".repeat(200);
+    let call = ResponseItem::CustomToolCall {
+        id: None,
+        status: None,
+        call_id: "code-mode-call".to_string(),
+        name: crate::tools::code_mode::PUBLIC_TOOL_NAME.to_string(),
+        input: "text('result')".to_string(),
+    };
+    let output = ResponseItem::CustomToolCallOutput {
+        call_id: "code-mode-call".to_string(),
+        name: None,
+        output: FunctionCallOutputPayload::from_text(long_output),
+    };
+
+    history.record_items([&call, &output], policy);
+
+    assert_eq!(history.items, vec![call, output]);
+}
+
+#[test]
 fn record_items_respects_custom_token_limit() {
     let mut history = ContextManager::new();
     let policy = TruncationPolicy::Tokens(10);

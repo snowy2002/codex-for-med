@@ -1811,10 +1811,12 @@ mod tests {
             .timeout(Duration::from_secs(90))
             .build()
             .expect("HTTP client");
-        let qdrant = QdrantRuntimeConfig::from_environment(None, None)
-            .expect("valid sandbox Qdrant configuration");
+        let qdrant = QdrantRuntimeConfig::from_environment(
+            /*url_override*/ None, /*collection_override*/ None,
+        )
+        .expect("valid sandbox Qdrant configuration");
         assert_eq!(
-            qdrant_count(&client, &qdrant, None)
+            qdrant_count(&client, &qdrant, /*filter*/ None)
                 .await
                 .expect("initial sandbox count"),
             0,
@@ -1866,7 +1868,7 @@ mod tests {
                 .exists(),
             "literature registry was not created"
         );
-        let first_count = qdrant_count(&client, &qdrant, None)
+        let first_count = qdrant_count(&client, &qdrant, /*filter*/ None)
             .await
             .expect("count after first workflow");
         assert!(first_count > 0, "first workflow did not write vectors");
@@ -1881,7 +1883,7 @@ mod tests {
         assert_eq!(second["vector_complete"], true);
         assert_eq!(second["vector_statuses"]["already_vectorized"], 1);
         assert_eq!(
-            qdrant_count(&client, &qdrant, None)
+            qdrant_count(&client, &qdrant, /*filter*/ None)
                 .await
                 .expect("count after repeated workflow"),
             first_count,
@@ -1891,13 +1893,16 @@ mod tests {
 
     #[test]
     fn pubmed_year_range_requires_complete_ordered_window() {
-        assert_eq!(pubmed_map_year_range(None, None).ok(), Some(None));
+        assert_eq!(
+            pubmed_map_year_range(/*min_year*/ None, /*max_year*/ None).ok(),
+            Some(None)
+        );
         assert_eq!(
             pubmed_map_year_range(Some(2015), Some(2026)).ok(),
             Some(Some((2015, 2026)))
         );
-        assert!(pubmed_map_year_range(Some(2015), None).is_err());
-        assert!(pubmed_map_year_range(None, Some(2026)).is_err());
+        assert!(pubmed_map_year_range(Some(2015), /*max_year*/ None).is_err());
+        assert!(pubmed_map_year_range(/*min_year*/ None, Some(2026)).is_err());
         assert!(pubmed_map_year_range(Some(2026), Some(2015)).is_err());
     }
 

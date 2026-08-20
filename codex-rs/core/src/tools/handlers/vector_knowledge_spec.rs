@@ -8,12 +8,12 @@ pub const SEARCH_VECTOR_KNOWLEDGE_TOOL_NAME: &str = "search_vector_knowledge";
 pub fn create_search_vector_knowledge_tool() -> ToolSpec {
     let scalar_filter_value = JsonSchema::any_of(
         vec![
-            JsonSchema::string(None),
-            JsonSchema::number(None),
-            JsonSchema::integer(None),
-            JsonSchema::boolean(None),
+            JsonSchema::string(/*description*/ None),
+            JsonSchema::number(/*description*/ None),
+            JsonSchema::integer(/*description*/ None),
+            JsonSchema::boolean(/*description*/ None),
         ],
-        None,
+        /*description*/ None,
     );
     let properties = BTreeMap::from([
         (
@@ -26,7 +26,7 @@ pub fn create_search_vector_knowledge_tool() -> ToolSpec {
         (
             "categories".to_string(),
             JsonSchema::array(
-                JsonSchema::string(None),
+                JsonSchema::string(/*description*/ None),
                 Some(
                     "Optional knowledge categories to search, for example bio_literature, web_knowledge, database_record, experiment_record, protocol, clinical_guideline, patent, or internal_note."
                         .to_string(),
@@ -37,16 +37,16 @@ pub fn create_search_vector_knowledge_tool() -> ToolSpec {
             "filters".to_string(),
             JsonSchema::object(
                 BTreeMap::new(),
-                None,
+                /*required*/ None,
                 Some(JsonSchema::any_of(
                     vec![
-                        JsonSchema::string(None),
-                        JsonSchema::number(None),
-                        JsonSchema::integer(None),
-                        JsonSchema::boolean(None),
-                        JsonSchema::array(scalar_filter_value, None),
+                        JsonSchema::string(/*description*/ None),
+                        JsonSchema::number(/*description*/ None),
+                        JsonSchema::integer(/*description*/ None),
+                        JsonSchema::boolean(/*description*/ None),
+                        JsonSchema::array(scalar_filter_value, /*description*/ None),
                     ],
-                    None,
+                    /*description*/ None,
                 ).into()),
             ),
         ),

@@ -48,11 +48,11 @@ fn model_from_preset(preset: &ModelPreset) -> Model {
             .supported_reasoning_efforts
             .iter()
             .map(|preset| ReasoningEffortOption {
-                reasoning_effort: preset.effort,
+                reasoning_effort: preset.effort.clone(),
                 description: preset.description.clone(),
             })
             .collect(),
-        default_reasoning_effort: preset.default_reasoning_effort,
+        default_reasoning_effort: preset.default_reasoning_effort.clone(),
         input_modalities: preset.input_modalities.clone(),
         // `write_models_cache()` round-trips through a simplified ModelInfo fixture that does not
         // preserve personality placeholders in base instructions, so app-server list results from

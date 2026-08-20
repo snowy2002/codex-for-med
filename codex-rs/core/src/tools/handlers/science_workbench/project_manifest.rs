@@ -184,7 +184,7 @@ mod tests {
     #[test]
     fn builds_fresh_manifest_when_absent() {
         let manifest = build_project_manifest(
-            None,
+            /*existing*/ None,
             "isr_aging",
             "isr aging",
             "2026-07-16T00:00:00+00:00",
@@ -211,7 +211,7 @@ mod tests {
     #[test]
     fn rerun_preserves_created_at_and_appends_run() {
         let first = build_project_manifest(
-            None,
+            /*existing*/ None,
             "proj",
             "orig topic",
             "2026-01-01T00:00:00+00:00",
@@ -262,7 +262,7 @@ mod tests {
     #[test]
     fn updating_pubmed_outputs_preserves_local_outputs() {
         let local = build_project_manifest(
-            None,
+            /*existing*/ None,
             "proj",
             "topic",
             "2026-03-03T00:00:00+00:00",

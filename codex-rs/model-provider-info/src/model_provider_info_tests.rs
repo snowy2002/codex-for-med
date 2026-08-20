@@ -140,6 +140,19 @@ fn test_supports_remote_compaction_for_openai() {
 }
 
 #[test]
+fn openai_provider_reports_audited_protocol_version() {
+    let provider = ModelProviderInfo::create_openai_provider(/*base_url*/ None);
+
+    assert_eq!(
+        provider.http_headers,
+        Some(maplit::hashmap! {
+            "version".to_string() =>
+                codex_build_info::upstream_protocol_client_version().to_string(),
+        })
+    );
+}
+
+#[test]
 fn test_supports_remote_compaction_for_azure_name() {
     let provider = ModelProviderInfo {
         name: "Azure".into(),

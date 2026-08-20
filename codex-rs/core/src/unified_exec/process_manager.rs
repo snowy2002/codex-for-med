@@ -1160,6 +1160,7 @@ impl UnifiedExecProcessManager {
                 continue;
             }
 
+            post_exit_deadline = None;
             for chunk in drained_chunks {
                 collected.extend_from_slice(&chunk);
             }

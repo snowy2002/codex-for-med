@@ -76,6 +76,7 @@ use codex_login::CodexAuth;
 use codex_login::read_codex_access_token_from_env;
 use codex_memories_write::clear_memory_roots_contents;
 use codex_models_manager::bundled_models_response;
+use codex_models_manager::compatibility::model_compatibility_manifest;
 use codex_models_manager::manager::RefreshStrategy;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::user_input::UserInput;
@@ -212,6 +213,9 @@ struct DebugCommand {
 enum DebugSubcommand {
     /// Render the raw model catalog as JSON.
     Models(DebugModelsCommand),
+
+    /// Render Codex Med release and audited upstream compatibility metadata as JSON.
+    ModelCompatibility,
 
     /// Tooling: helps debug the app server.
     AppServer(DebugAppServerCommand),
@@ -1290,6 +1294,16 @@ async fn cli_main(arg0_paths: Arg0DispatchPaths) -> anyhow::Result<()> {
                     "debug models",
                 )?;
                 run_debug_models_command(cmd, root_config_overrides).await?;
+            }
+            DebugSubcommand::ModelCompatibility => {
+                reject_remote_mode_for_subcommand(
+                    root_remote.as_deref(),
+                    root_remote_auth_token_env.as_deref(),
+                    "debug model-compatibility",
+                )?;
+                let manifest = model_compatibility_manifest()?;
+                serde_json::to_writer_pretty(std::io::stdout(), &manifest)?;
+                println!();
             }
             DebugSubcommand::AppServer(cmd) => {
                 reject_remote_mode_for_subcommand(
@@ -2395,6 +2409,19 @@ mod tests {
         };
 
         assert!(cmd.bundled);
+    }
+
+    #[test]
+    fn debug_model_compatibility_subcommand_parses() {
+        let cli =
+            MultitoolCli::try_parse_from(["codex", "debug", "model-compatibility"]).expect("parse");
+
+        assert!(matches!(
+            cli.subcommand,
+            Some(Subcommand::Debug(DebugCommand {
+                subcommand: DebugSubcommand::ModelCompatibility,
+            }))
+        ));
     }
 
     #[test]

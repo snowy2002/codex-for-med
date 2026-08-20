@@ -1,0 +1,45 @@
+{
+  "schema_version": 2,
+  "codex_med_version": "0.1.7",
+  "model_cache_schema_version": 1,
+  "upstream": {
+    "repository": "https://github.com/openai/codex.git",
+    "revision": "5c0e582c59892dbec89af78ae62c784d3da6c9cb",
+    "npm_release": "0.147.0",
+    "protocol_client_version": "0.147.0"
+  },
+  "tracked_files": [
+    {
+      "path": "codex-rs/protocol/src/openai_models.rs",
+      "sha256": "dea7eb2695b644fee838014e25490eeabd0b9d6c9e23d5e4c32a9114b02e027d"
+    },
+    {
+      "path": "codex-rs/codex-api/src/endpoint/models.rs",
+      "sha256": "3ee296c3fbde1336f9e434c7f983b3ffa5c6d6743281c0e2953c92e4cc8644eb"
+    },
+    {
+      "path": "codex-rs/models-manager/src/manager.rs",
+      "sha256": "30a9dd8d81a3273d37b34fad0f75e05421737a5aee8715a15416599dcb656708"
+    },
+    {
+      "path": "codex-rs/models-manager/src/cache.rs",
+      "sha256": "086c44feab55f6fc0f739d1cb49cf575b69cb9226d2d95a3a72def9e076b8de6"
+    },
+    {
+      "path": "codex-rs/model-provider/src/models_endpoint.rs",
+      "sha256": "70d6f827e0745a75516eb78b36e2207153184e9575d59c0a2b5fd50162a91343"
+    },
+    {
+      "path": "codex-rs/model-provider-info/src/lib.rs",
+      "sha256": "131bae0013a98b0f7558ad4df8e6c4d004b7ecacff48590e994b74a01d17245e"
+    },
+    {
+      "path": "codex-rs/tui/src/chatwidget/model_popups.rs",
+      "sha256": "aac7231a2bb9f994eeb692b13775ac5337f931af8e4d452ac996be1d9de97ad4"
+    },
+    {
+      "path": "codex-rs/tui/src/chatwidget/reasoning_shortcuts.rs",
+      "sha256": "bed34bc6dbf38025bc52475c8dc17a0e0f56132fb1bd3eb11e37fe3bb9ea3497"
+    }
+  ]
+}

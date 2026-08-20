@@ -181,13 +181,19 @@ impl<'a> PubmedVectorIngestor<'a> {
                     &self.config.collection,
                     PUBMED_EMBEDDING_PROFILE,
                     "possible_duplicate",
-                    None,
+                    /*existing_dataset*/ None,
                     Some(review_case_id),
-                    None,
+                    /*last_error*/ None,
                     &now.to_rfc3339(),
                 )
                 .await;
-            return result("possible_duplicate", 0, 0, None, None);
+            return result(
+                "possible_duplicate",
+                /*expected_points*/ 0,
+                /*verified_points*/ 0,
+                /*existing_dataset*/ None,
+                /*error*/ None,
+            );
         }
 
         let chunks = build_pubmed_chunks(literature);
@@ -199,13 +205,19 @@ impl<'a> PubmedVectorIngestor<'a> {
                     &self.config.collection,
                     PUBMED_EMBEDDING_PROFILE,
                     "failed",
-                    None,
-                    None,
+                    /*existing_dataset*/ None,
+                    /*review_case_id*/ None,
                     Some(&error),
                     &now.to_rfc3339(),
                 )
                 .await;
-            return result("failed", 0, 0, None, Some(error));
+            return result(
+                "failed",
+                /*expected_points*/ 0,
+                /*verified_points*/ 0,
+                /*existing_dataset*/ None,
+                Some(error),
+            );
         }
 
         let existing = match self.find_existing(literature).await {
@@ -233,8 +245,8 @@ impl<'a> PubmedVectorIngestor<'a> {
                         PUBMED_EMBEDDING_PROFILE,
                         "already_vectorized",
                         existing.dataset.as_deref(),
-                        None,
-                        None,
+                        /*review_case_id*/ None,
+                        /*last_error*/ None,
                         &now.to_rfc3339(),
                     )
                     .await;
@@ -270,8 +282,8 @@ impl<'a> PubmedVectorIngestor<'a> {
                                             PUBMED_EMBEDDING_PROFILE,
                                             "already_vectorized",
                                             existing.dataset.as_deref(),
-                                            None,
-                                            None,
+                                            /*review_case_id*/ None,
+                                            /*last_error*/ None,
                                             &now.to_rfc3339(),
                                         )
                                         .await;
@@ -329,14 +341,19 @@ impl<'a> PubmedVectorIngestor<'a> {
                                 &self.config.collection,
                                 PUBMED_EMBEDDING_PROFILE,
                                 "possible_duplicate",
-                                None,
+                                /*existing_dataset*/ None,
                                 Some(&review_case_id),
-                                None,
+                                /*last_error*/ None,
                                 &now.to_rfc3339(),
                             )
                             .await;
-                        let mut duplicate =
-                            result("possible_duplicate", chunks.len(), 0, None, None);
+                        let mut duplicate = result(
+                            "possible_duplicate",
+                            chunks.len(),
+                            /*verified_points*/ 0,
+                            /*existing_dataset*/ None,
+                            /*error*/ None,
+                        );
                         duplicate.review_case_id = Some(review_case_id);
                         return duplicate;
                     }
@@ -365,8 +382,8 @@ impl<'a> PubmedVectorIngestor<'a> {
                     PUBMED_EMBEDDING_PROFILE,
                     "already_vectorized",
                     Some("pubmed"),
-                    None,
-                    None,
+                    /*review_case_id*/ None,
+                    /*last_error*/ None,
                     &now.to_rfc3339(),
                 )
                 .await;
@@ -375,7 +392,7 @@ impl<'a> PubmedVectorIngestor<'a> {
                 chunks.len(),
                 deterministic_ids.len(),
                 Some("pubmed".to_string()),
-                None,
+                /*error*/ None,
             );
         }
 
@@ -386,9 +403,9 @@ impl<'a> PubmedVectorIngestor<'a> {
                     &self.config.collection,
                     PUBMED_EMBEDDING_PROFILE,
                     "pending",
-                    None,
-                    None,
-                    None,
+                    /*existing_dataset*/ None,
+                    /*review_case_id*/ None,
+                    /*last_error*/ None,
                     &now.to_rfc3339(),
                 )
                 .await;
@@ -396,8 +413,8 @@ impl<'a> PubmedVectorIngestor<'a> {
                 "vector_write_disabled",
                 chunks.len(),
                 deterministic_ids.len(),
-                None,
-                None,
+                /*existing_dataset*/ None,
+                /*error*/ None,
             );
         }
         if self.config.collection == QDRANT_COLLECTION {
@@ -450,17 +467,35 @@ impl<'a> PubmedVectorIngestor<'a> {
         {
             Ok(VectorLeaseOutcome::Acquired(lease)) => lease,
             Ok(VectorLeaseOutcome::NotAcquired { status }) => {
-                return result(&status, chunks.len(), 0, None, None);
+                return result(
+                    &status,
+                    chunks.len(),
+                    /*verified_points*/ 0,
+                    /*existing_dataset*/ None,
+                    /*error*/ None,
+                );
             }
             Err(error) => {
-                return result("failed", chunks.len(), 0, None, Some(format!("{error:#}")));
+                return result(
+                    "failed",
+                    chunks.len(),
+                    /*verified_points*/ 0,
+                    /*existing_dataset*/ None,
+                    Some(format!("{error:#}")),
+                );
             }
         };
         match self
             .ingest_claimed(registry, literature, &chunks, &lease, now)
             .await
         {
-            Ok(verified) => result("complete", chunks.len(), verified, None, None),
+            Ok(verified) => result(
+                "complete",
+                chunks.len(),
+                verified,
+                /*existing_dataset*/ None,
+                /*error*/ None,
+            ),
             Err(error) => {
                 let error = format!("{error:#}");
                 let _ = registry
@@ -468,12 +503,18 @@ impl<'a> PubmedVectorIngestor<'a> {
                         &lease,
                         "failed",
                         Some(chunks.len()),
-                        None,
+                        /*verified_point_count*/ None,
                         Some(&error),
                         chrono::Utc::now(),
                     )
                     .await;
-                result("failed", chunks.len(), 0, None, Some(error))
+                result(
+                    "failed",
+                    chunks.len(),
+                    /*verified_points*/ 0,
+                    /*existing_dataset*/ None,
+                    Some(error),
+                )
             }
         }
     }
@@ -498,7 +539,7 @@ impl<'a> PubmedVectorIngestor<'a> {
                     "complete",
                     Some(chunks.len()),
                     Some(chunks.len()),
-                    None,
+                    /*last_error*/ None,
                     chrono::Utc::now(),
                 )
                 .await?;
@@ -531,7 +572,7 @@ impl<'a> PubmedVectorIngestor<'a> {
                         "embedding",
                         Some(chunks.len()),
                         Some(existing_ids.len()),
-                        None,
+                        /*last_error*/ None,
                         chrono::Utc::now(),
                     )
                     .await?;
@@ -545,7 +586,7 @@ impl<'a> PubmedVectorIngestor<'a> {
                 "upserting",
                 Some(chunks.len()),
                 Some(existing_ids.len()),
-                None,
+                /*last_error*/ None,
                 chrono::Utc::now(),
             )
             .await?;
@@ -556,8 +597,8 @@ impl<'a> PubmedVectorIngestor<'a> {
                     lease,
                     "upserting",
                     Some(chunks.len()),
-                    None,
-                    None,
+                    /*verified_point_count*/ None,
+                    /*last_error*/ None,
                     chrono::Utc::now(),
                 )
                 .await?;
@@ -567,8 +608,8 @@ impl<'a> PubmedVectorIngestor<'a> {
                 lease,
                 "verifying",
                 Some(chunks.len()),
-                None,
-                None,
+                /*verified_point_count*/ None,
+                /*last_error*/ None,
                 chrono::Utc::now(),
             )
             .await?;
@@ -584,7 +625,7 @@ impl<'a> PubmedVectorIngestor<'a> {
                 "complete",
                 Some(chunks.len()),
                 Some(verified),
-                None,
+                /*last_error*/ None,
                 chrono::Utc::now(),
             )
             .await?;
@@ -811,7 +852,7 @@ impl<'a> PubmedVectorIngestor<'a> {
                     "{}/collections/{}",
                     self.config.qdrant_url, self.config.collection
                 ),
-                None,
+                /*body*/ None,
                 "Qdrant collection configuration",
             )
             .await?;
@@ -835,7 +876,7 @@ impl<'a> PubmedVectorIngestor<'a> {
                     "{}/collections/{}/snapshots",
                     self.config.qdrant_url, self.config.collection
                 ),
-                None,
+                /*body*/ None,
                 "Qdrant snapshot precondition",
             )
             .await?;
@@ -923,13 +964,19 @@ impl<'a> PubmedVectorIngestor<'a> {
                 &self.config.collection,
                 PUBMED_EMBEDDING_PROFILE,
                 "failed",
-                None,
-                None,
+                /*existing_dataset*/ None,
+                /*review_case_id*/ None,
                 Some(&error),
                 &now.to_rfc3339(),
             )
             .await;
-        result("failed", expected_points, 0, None, Some(error))
+        result(
+            "failed",
+            expected_points,
+            /*verified_points*/ 0,
+            /*existing_dataset*/ None,
+            Some(error),
+        )
     }
 }
 
@@ -1181,7 +1228,7 @@ mod tests {
                     metadata: json!({}),
                     ..Default::default()
                 },
-                None,
+                /*source*/ None,
                 "2026-01-01T00:00:00Z",
             )
             .await
@@ -1287,7 +1334,7 @@ mod tests {
             "http://127.0.0.1:1",
             "http://127.0.0.1:2/embed",
             "temporary",
-            false,
+            /*write_enabled*/ false,
         );
         assert!(!config.write_enabled);
         assert_eq!(config.collection, "temporary");
@@ -1316,10 +1363,15 @@ mod tests {
             &server.uri(),
             &format!("{}/embed", server.uri()),
             "temporary",
-            false,
+            /*write_enabled*/ false,
         );
         let result = PubmedVectorIngestor::new(&client, config)
-            .ingest(&registry, &literature, None, test_now())
+            .ingest(
+                &registry,
+                &literature,
+                /*review_case_id*/ None,
+                test_now(),
+            )
             .await;
 
         assert_eq!(result.status, "vector_write_disabled");
@@ -1361,10 +1413,15 @@ mod tests {
             &server.uri(),
             &format!("{}/embed", server.uri()),
             "temporary",
-            true,
+            /*write_enabled*/ true,
         );
         let result = PubmedVectorIngestor::new(&client, config)
-            .ingest(&registry, &literature, None, test_now())
+            .ingest(
+                &registry,
+                &literature,
+                /*review_case_id*/ None,
+                test_now(),
+            )
             .await;
 
         assert_eq!(result.status, "already_vectorized");
@@ -1472,11 +1529,16 @@ mod tests {
             &server.uri(),
             &format!("{}/embed", server.uri()),
             "temporary",
-            true,
+            /*write_enabled*/ true,
         );
 
         let result = PubmedVectorIngestor::new(&client, config)
-            .ingest(&registry, &literature, None, test_now())
+            .ingest(
+                &registry,
+                &literature,
+                /*review_case_id*/ None,
+                test_now(),
+            )
             .await;
 
         assert_eq!(result.status, "already_vectorized");
@@ -1548,14 +1610,24 @@ mod tests {
             &server.uri(),
             &format!("{}/embed", server.uri()),
             "temporary",
-            true,
+            /*write_enabled*/ true,
         );
         let ingestor = PubmedVectorIngestor::new(&client, config);
         let first = ingestor
-            .ingest(&registry, &literature, None, test_now())
+            .ingest(
+                &registry,
+                &literature,
+                /*review_case_id*/ None,
+                test_now(),
+            )
             .await;
         let second = ingestor
-            .ingest(&registry, &literature, None, test_now())
+            .ingest(
+                &registry,
+                &literature,
+                /*review_case_id*/ None,
+                test_now(),
+            )
             .await;
 
         assert_eq!(first.status, "complete");
@@ -1577,9 +1649,9 @@ mod tests {
                 "temporary",
                 PUBMED_EMBEDDING_PROFILE,
                 "complete",
-                None,
-                None,
-                None,
+                /*existing_dataset*/ None,
+                /*review_case_id*/ None,
+                /*last_error*/ None,
                 &test_now().to_rfc3339(),
             )
             .await
@@ -1645,10 +1717,15 @@ mod tests {
             &server.uri(),
             &format!("{}/embed", server.uri()),
             "temporary",
-            true,
+            /*write_enabled*/ true,
         );
         let result = PubmedVectorIngestor::new(&client, config)
-            .ingest(&registry, &literature, None, test_now())
+            .ingest(
+                &registry,
+                &literature,
+                /*review_case_id*/ None,
+                test_now(),
+            )
             .await;
 
         assert_eq!(result.status, "complete");
@@ -1722,15 +1799,25 @@ mod tests {
             &server.uri(),
             &format!("{}/embed", server.uri()),
             "temporary",
-            true,
+            /*write_enabled*/ true,
         );
         let ingestor = PubmedVectorIngestor::new(&client, config);
         let literature_id = literature.literature_id.clone();
         let first = ingestor
-            .ingest(&registry, &literature, None, test_now())
+            .ingest(
+                &registry,
+                &literature,
+                /*review_case_id*/ None,
+                test_now(),
+            )
             .await;
         let second = ingestor
-            .ingest(&registry, &literature, None, test_now())
+            .ingest(
+                &registry,
+                &literature,
+                /*review_case_id*/ None,
+                test_now(),
+            )
             .await;
 
         assert_eq!(first.status, "failed");
@@ -1767,10 +1854,15 @@ mod tests {
             &format!("{}/embed", embedding_server.uri()),
             &collection,
             &qdrant_api_key,
-            false,
+            /*write_enabled*/ false,
         );
         let disabled_result = PubmedVectorIngestor::new(&client, disabled)
-            .ingest(&registry, &literature, None, test_now())
+            .ingest(
+                &registry,
+                &literature,
+                /*review_case_id*/ None,
+                test_now(),
+            )
             .await;
         assert_eq!(
             disabled_result,
@@ -1795,14 +1887,24 @@ mod tests {
             &format!("{}/embed", embedding_server.uri()),
             &collection,
             &qdrant_api_key,
-            true,
+            /*write_enabled*/ true,
         );
         let ingestor = PubmedVectorIngestor::new(&client, enabled);
         let first = ingestor
-            .ingest(&registry, &literature, None, test_now())
+            .ingest(
+                &registry,
+                &literature,
+                /*review_case_id*/ None,
+                test_now(),
+            )
             .await;
         let second = ingestor
-            .ingest(&registry, &literature, None, test_now())
+            .ingest(
+                &registry,
+                &literature,
+                /*review_case_id*/ None,
+                test_now(),
+            )
             .await;
         assert_eq!(
             (first.status.as_str(), second.status.as_str()),
@@ -1859,10 +1961,15 @@ mod tests {
             &format!("{}/embed", embedding_server.uri()),
             &collection,
             &qdrant_api_key,
-            true,
+            /*write_enabled*/ true,
         );
         let partial_result = PubmedVectorIngestor::new(&client, partial_config)
-            .ingest(&partial_registry, &partial_literature, None, test_now())
+            .ingest(
+                &partial_registry,
+                &partial_literature,
+                /*review_case_id*/ None,
+                test_now(),
+            )
             .await;
         assert_eq!(
             partial_result,
@@ -1902,15 +2009,25 @@ mod tests {
             &format!("{}/embed", failure_server.uri()),
             &collection,
             &qdrant_api_key,
-            true,
+            /*write_enabled*/ true,
         );
         let failure_ingestor = PubmedVectorIngestor::new(&client, failure_config);
         let literature_id = failure_literature.literature_id.clone();
         let failed = failure_ingestor
-            .ingest(&failure_registry, &failure_literature, None, test_now())
+            .ingest(
+                &failure_registry,
+                &failure_literature,
+                /*review_case_id*/ None,
+                test_now(),
+            )
             .await;
         let recovered = failure_ingestor
-            .ingest(&failure_registry, &failure_literature, None, test_now())
+            .ingest(
+                &failure_registry,
+                &failure_literature,
+                /*review_case_id*/ None,
+                test_now(),
+            )
             .await;
         assert_eq!(
             (failed.status.as_str(), recovered.status.as_str()),
@@ -1942,14 +2059,24 @@ mod tests {
             &format!("{}/embed", concurrency_server.uri()),
             &collection,
             &qdrant_api_key,
-            true,
+            /*write_enabled*/ true,
         );
         let first_ingestor = PubmedVectorIngestor::new(&client, concurrency_config.clone());
         let second_ingestor = PubmedVectorIngestor::new(&client, concurrency_config);
         let second_literature = concurrent_literature.clone();
         let (first_concurrent, second_concurrent) = tokio::join!(
-            first_ingestor.ingest(&first_registry, &concurrent_literature, None, test_now()),
-            second_ingestor.ingest(&second_registry, &second_literature, None, test_now()),
+            first_ingestor.ingest(
+                &first_registry,
+                &concurrent_literature,
+                /*review_case_id*/ None,
+                test_now()
+            ),
+            second_ingestor.ingest(
+                &second_registry,
+                &second_literature,
+                /*review_case_id*/ None,
+                test_now()
+            ),
         );
         assert!(first_concurrent.status == "complete" || second_concurrent.status == "complete");
         assert_eq!(
@@ -1979,12 +2106,17 @@ mod tests {
             &format!("{}/embed", embedding_server.uri()),
             &collection,
             &qdrant_api_key,
-            true,
+            /*write_enabled*/ true,
         );
         let before_local_duplicate =
             sandbox_point_count(&client, &qdrant_url, &collection, &qdrant_api_key).await;
         let local_duplicate = PubmedVectorIngestor::new(&client, local_duplicate_config)
-            .ingest(&local_registry, &local_literature, None, test_now())
+            .ingest(
+                &local_registry,
+                &local_literature,
+                /*review_case_id*/ None,
+                test_now(),
+            )
             .await;
         assert_eq!(local_duplicate.status, "already_vectorized");
         assert_eq!(

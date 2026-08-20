@@ -132,17 +132,22 @@ fn gpt_5_4_cmb_reasoning_levels() -> Vec<ReasoningEffortPreset> {
 }
 
 fn reasoning_effort_preset(effort: ReasoningEffort) -> ReasoningEffortPreset {
+    let description = match &effort {
+        ReasoningEffort::None => "No reasoning".to_string(),
+        ReasoningEffort::Minimal => "Minimal reasoning".to_string(),
+        ReasoningEffort::Low => "Fast responses with lighter reasoning".to_string(),
+        ReasoningEffort::Medium => {
+            "Balances speed and reasoning depth for everyday tasks".to_string()
+        }
+        ReasoningEffort::High => "Greater reasoning depth for complex problems".to_string(),
+        ReasoningEffort::XHigh => "Extra high reasoning depth for complex problems".to_string(),
+        ReasoningEffort::Max => "Maximum reasoning depth for the hardest problems".to_string(),
+        ReasoningEffort::Ultra => "Maximum reasoning with automatic task delegation".to_string(),
+        ReasoningEffort::Custom(value) => format!("Provider-defined reasoning effort: {value}"),
+    };
     ReasoningEffortPreset {
         effort,
-        description: match effort {
-            ReasoningEffort::None => "No reasoning",
-            ReasoningEffort::Minimal => "Minimal reasoning",
-            ReasoningEffort::Low => "Fast responses with lighter reasoning",
-            ReasoningEffort::Medium => "Balances speed and reasoning depth for everyday tasks",
-            ReasoningEffort::High => "Greater reasoning depth for complex problems",
-            ReasoningEffort::XHigh => "Extra high reasoning depth for complex problems",
-        }
-        .to_string(),
+        description,
     }
 }
 

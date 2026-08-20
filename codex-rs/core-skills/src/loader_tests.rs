@@ -1464,7 +1464,7 @@ async fn loads_skills_from_managed_package_root() {
         Some(Arc::clone(&LOCAL_FS)),
         &cfg.config_layer_stack,
         &cfg.cwd,
-        None,
+        /*home_dir*/ None,
         Some(&managed_package_root_abs),
         Vec::new(),
     )

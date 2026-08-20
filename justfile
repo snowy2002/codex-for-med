@@ -7,6 +7,10 @@ rust_min_stack := "8388608" # 8 MiB
 help:
     just -l
 
+[no-cd]
+model-compat-check *args:
+    python3 {{ justfile_directory() }}/scripts/check_model_compatibility.py "$@"
+
 # `codex`
 alias c := codex
 codex *args:

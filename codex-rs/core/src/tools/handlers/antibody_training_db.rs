@@ -264,7 +264,7 @@ async fn query_antibody_training_records(
         "sql": sql,
         "applied_sql": response.get("applied_sql").cloned().unwrap_or(Value::Null),
         "max_rows": max_rows,
-        "returned_rows": rows_value.as_array().map(|a| a.len()).unwrap_or(0),
+        "returned_rows": rows_value.as_array().map(std::vec::Vec::len).unwrap_or(0),
         "columns": columns,
         "rows": rows_value,
         "server_duration_ms": response.get("duration_ms").cloned().unwrap_or(Value::Null),
@@ -380,12 +380,12 @@ fn truncate_cells(rows: &mut Value, max_cell_chars: usize) {
             continue;
         };
         for (_key, cell) in obj.iter_mut() {
-            if let Value::String(s) = cell {
-                if s.chars().count() > max_cell_chars {
-                    let truncated: String = s.chars().take(max_cell_chars).collect();
-                    let dropped = s.chars().count() - max_cell_chars;
-                    *cell = Value::String(format!("{truncated}...<truncated {dropped} chars>"));
-                }
+            if let Value::String(s) = cell
+                && s.chars().count() > max_cell_chars
+            {
+                let truncated: String = s.chars().take(max_cell_chars).collect();
+                let dropped = s.chars().count() - max_cell_chars;
+                *cell = Value::String(format!("{truncated}...<truncated {dropped} chars>"));
             }
         }
     }

@@ -2,8 +2,9 @@
 // Unified entry point for the Codex CLI.
 
 import { spawn } from "node:child_process";
-import { existsSync, realpathSync } from "fs";
+import { existsSync, mkdirSync, realpathSync } from "fs";
 import { createRequire } from "node:module";
+import { homedir } from "node:os";
 import path from "path";
 import { fileURLToPath } from "url";
 
@@ -13,7 +14,12 @@ const __dirname = path.dirname(__filename);
 const require = createRequire(import.meta.url);
 
 const PLATFORM_PACKAGE_BY_TARGET = {
-  "x86_64-unknown-linux-gnu": "@gair/codex-med-linux-x64",
+  "x86_64-unknown-linux-musl": "@gair/codex-med-linux-x64",
+  "aarch64-unknown-linux-musl": "@gair/codex-med-linux-arm64",
+  "x86_64-apple-darwin": "@gair/codex-med-darwin-x64",
+  "aarch64-apple-darwin": "@gair/codex-med-darwin-arm64",
+  "x86_64-pc-windows-msvc": "@gair/codex-med-win32-x64",
+  "aarch64-pc-windows-msvc": "@gair/codex-med-win32-arm64",
 };
 
 const { platform, arch } = process;
@@ -24,7 +30,7 @@ switch (platform) {
   case "android":
     switch (arch) {
       case "x64":
-        targetTriple = "x86_64-unknown-linux-gnu";
+        targetTriple = "x86_64-unknown-linux-musl";
         break;
       case "arm64":
         targetTriple = "aarch64-unknown-linux-musl";
@@ -169,6 +175,15 @@ if (existsSync(pathDir)) {
 const updatedPath = getUpdatedPath(additionalDirs);
 
 const env = { ...process.env, PATH: updatedPath };
+const configuredCodexMedHome = process.env.CODEX_MED_HOME;
+const codexMedHome = configuredCodexMedHome
+  ? path.resolve(configuredCodexMedHome)
+  : path.join(homedir(), ".codex-med");
+mkdirSync(codexMedHome, { recursive: true });
+env.CODEX_MED_HOME = codexMedHome;
+// Keep Codex Med authentication, model metadata, and state isolated from the
+// regular Codex installation while the native CLI continues to read CODEX_HOME.
+env.CODEX_HOME = codexMedHome;
 const packageManagerEnvVar =
   detectPackageManager() === "bun"
     ? "CODEX_MANAGED_BY_BUN"

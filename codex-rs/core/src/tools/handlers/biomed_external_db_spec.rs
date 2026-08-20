@@ -289,7 +289,7 @@ pub fn create_validate_citations_tool() -> ToolSpec {
             (
                 "claimed_authors".to_string(),
                 JsonSchema::array(
-                    JsonSchema::string(None),
+                    JsonSchema::string(/*description*/ None),
                     Some(
                         "Optional author names the citation claims. Each is matched by surname against the Crossref author list."
                             .to_string(),
